@@ -35,6 +35,8 @@
 
 #include "dablin_gtk_dl_plus.h"
 #include "dablin_gtk_sls.h"
+#include "dablin_gtk_cu_bar.h"
+#include "dablin_gtk_logs.h"
 #include "eti_source.h"
 #include "edi_source.h"
 #include "edi_player.h"
@@ -60,14 +62,12 @@ public:
 };
 
 
-// --- DABlinGTKServiceColumns -----------------------------------------------------------------
-class DABlinGTKServiceColumns : public Gtk::TreeModelColumnRecord {
+// --- DABlinGTKServiceDetailsColumns -----------------------------------------------------------------
+class DABlinGTKServiceDetailsColumns : public Gtk::TreeModelColumnRecord {
 public:
-	Gtk::TreeModelColumn<Glib::ustring> col_string;
 	Gtk::TreeModelColumn<LISTED_SERVICE> col_service;
 
-	DABlinGTKServiceColumns() {
-		add(col_string);
+	DABlinGTKServiceDetailsColumns() {
 		add(col_service);
 	}
 };
@@ -92,8 +92,6 @@ struct DABlinGTKOptions {
 	bool untouched_output;
 	bool disable_int_catch_up;
 	int gain;
-	bool initially_disable_dl_plus;
-	bool initially_disable_slideshow;
 	bool loose;
 	bool disable_dyn_fic_msgs;
 	
@@ -110,8 +108,6 @@ DABlinGTKOptions() :
 	untouched_output(false),
 	disable_int_catch_up(false),
 	gain(DAB_LIVE_SOURCE_CHANNEL::auto_gain),
-	initially_disable_dl_plus(false),
-	initially_disable_slideshow(false),
 	loose(false),
 	disable_dyn_fic_msgs(false)
 	{}
@@ -179,8 +175,7 @@ private:
 	int switch_service_scids;
 	bool switch_service_applied;
 
-	DABlinGTKDLPlusWindow dl_plus_window;
-	DABlinGTKSlideshowWindow slideshow_window;
+	DABlinGTKLogsWindow logs_window;
 
 	EnsembleSource *ensemble_source;
 	std::thread ensemble_source_thread;
@@ -229,6 +224,7 @@ private:
 
 
 	Gtk::Grid top_grid;
+	Gtk::Grid header_grid;
 
 	Gtk::Frame frame_combo_channels;
 	Gtk::Box channels_box;
@@ -242,25 +238,40 @@ private:
 	Gtk::Frame frame_label_ensemble;
 	Gtk::Label label_ensemble;
 
-	Gtk::Frame frame_combo_services;
-	DABlinGTKServiceColumns combo_services_cols;
-	Glib::RefPtr<Gtk::ListStore> combo_services_liststore;
-	Gtk::ComboBox combo_services;
-	int ComboServicesSlotCompare(const Gtk::TreeModel::iterator& a, const Gtk::TreeModel::iterator& b);
+	AUDIO_SERVICE_FORMAT current_audio_format;
+	int current_audio_format_subchid;
 
-	Gtk::Frame frame_label_format;
-	Gtk::Label label_format;
+	Gtk::Frame frame_services_table;
+	Gtk::Box services_table_box;
+	Gtk::ScrolledWindow services_table_scroll;
+	Gtk::TreeView services_table;
+	DABlinGTKServiceDetailsColumns services_table_cols;
+	Glib::RefPtr<Gtk::ListStore> services_table_liststore;
+	DABlinGTKCUBar cu_bar;
+	int ServicesTableSlotCompare(const Gtk::TreeModel::iterator& a, const Gtk::TreeModel::iterator& b);
+	void RenderServiceDetailCell(Gtk::CellRenderer* renderer, const Gtk::TreeModel::iterator& it, int column_id);
+	Gtk::ListStore::iterator UpdateServicesTableRow(const LISTED_SERVICE& service, bool* was_new = nullptr);
+	int GetSelectedServiceIndex();
+	void TrySwitchService(int index);
+	void UpdateCUBar();
+
+	Gtk::Box lower_controls_box;
 
 	Gtk::ToggleButton tglbtn_record;
 	Gtk::Label label_record;
 
-	Gtk::ToggleButton tglbtn_slideshow;
-	Gtk::ToggleButton tglbtn_dl_plus;
+	Gtk::ToggleButton tglbtn_logs;
 	Gtk::ToggleButton tglbtn_mute;
 	Gtk::VolumeButton vlmbtn;
 
 	Gtk::Frame frame_label_dl;
 	Gtk::Label label_dl;
+
+	Gtk::Box dl_plus_slideshow_box;
+	Gtk::Frame frame_dl_plus;
+	DABlinGTKDLPlusContent dl_plus_content;
+	Gtk::Frame frame_slideshow;
+	DABlinGTKSlideshowContent slideshow_content;
 
 	Gtk::Frame frame_label_datetime;
 	Gtk::Label label_datetime;
@@ -283,10 +294,9 @@ private:
 	void on_tglbtn_record();
 	void on_tglbtn_mute();
 	void on_vlmbtn(double value);
-	void on_tglbtn_dl_plus();
-	void on_tglbtn_slideshow();
+	void on_tglbtn_logs();
 	void on_combo_channels();
-	void on_combo_services();
+	void on_services_table_selection_changed();
 	bool on_window_delete_event(GdkEventAny* any_event);
 
 	bool HandleKeyPressEvent(GdkEventKey* key_event);
@@ -316,7 +326,16 @@ private:
 	void FICChangeService(const LISTED_SERVICE& service) {fic_change_service.PushAndEmit(service);}
 	void FICChangeServiceEmitted();
 
+	GTKDispatcherQueue<fic_service_id_t> fic_remove_service;
+	void FICRemoveService(const fic_service_id_t& service_id) {fic_remove_service.PushAndEmit(service_id);}
+	void FICRemoveServiceEmitted();
+
 	void FICChangeUTCDateTime(const FIC_DAB_DT& utc_dt);
+
+	GTKDispatcherQueue<std::string> fic_log_message;
+	void FICLogMessage(const std::string& message) {fic_log_message.PushAndEmit(message);}
+	void FICLogMessageEmitted();
+
 	void FICDiscardedFIB();
 
 	// PAD data change

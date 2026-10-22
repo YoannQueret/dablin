@@ -27,6 +27,8 @@
 #include <vector>
 #include <math.h>
 #include <time.h>
+#include <chrono>
+#include <utility>
 
 #include "tools.h"
 
@@ -204,6 +206,10 @@ struct FIC_SERVICE {
 	comp_labels_t comp_labels;		// from FIG 1/4 : SCIdS -> FIC_LABEL
 	comp_sls_uas_t comp_sls_uas;	// from FIG 0/13: SCIdS -> UA data
 
+	// liveness, as (re)announced by FIG 0/2 - used to detect hot removal of this service
+	bool seen_in_fig0_2;
+	std::chrono::steady_clock::time_point last_seen_fig0_2;
+
 	static const int sid_none = -1;
 	bool IsNone() const {return sid == sid_none;}
 
@@ -214,7 +220,7 @@ struct FIC_SERVICE {
 
 	static const int asu_flags_none = 0x0000;
 
-	FIC_SERVICE() : sid(sid_none), pri_comp_subchid(pri_comp_subchid_none), pty_static(pty_none), pty_dynamic(pty_none), asu_flags(asu_flags_none) {}
+	FIC_SERVICE() : sid(sid_none), pri_comp_subchid(pri_comp_subchid_none), pty_static(pty_none), pty_dynamic(pty_none), asu_flags(asu_flags_none), seen_in_fig0_2(false) {}
 };
 
 struct LISTED_SERVICE {
@@ -268,6 +274,9 @@ struct LISTED_SERVICE {
 typedef std::map<uint16_t, FIC_SERVICE> fic_services_t;
 typedef std::map<int, FIC_SUBCHANNEL> fic_subchannels_t;
 
+// identifies a listed service (as exposed to observers): SId + SCIdS (LISTED_SERVICE::scids_none for the primary component)
+typedef std::pair<uint16_t,int> fic_service_id_t;
+
 // --- FICDecoderObserver -----------------------------------------------------------------
 class FICDecoderObserver {
 public:
@@ -275,7 +284,11 @@ public:
 
 	virtual void FICChangeEnsemble(const FIC_ENSEMBLE& /*ensemble*/) {}
 	virtual void FICChangeService(const LISTED_SERVICE& /*service*/) {}
+	virtual void FICRemoveService(const fic_service_id_t& /*service_id*/) {}
 	virtual void FICChangeUTCDateTime(const FIC_DAB_DT& /*utc_dt*/) {}
+
+	// human-readable record of a hot change on the ensemble (EId, SId, label, short label, protection, bit rate, ...)
+	virtual void FICLogMessage(const std::string& /*message*/) {}
 
 	virtual void FICDiscardedFIB() {}
 };
@@ -314,11 +327,19 @@ private:
 	void UpdateListedService(const FIC_SERVICE& service, int scids, bool multi_comps);
 	int GetSLSAppType(const ua_data_t& ua_data);
 
+	void Log(const std::string& message);
+
 	FIC_ENSEMBLE ensemble;
 	void UpdateEnsemble();
 
 	fic_services_t services;
 	fic_subchannels_t subchannels;	// from FIG 0/1: SubChId -> FIC_SUBCHANNEL
+
+	void RemoveService(const FIC_SERVICE& service);
+	void PruneOrphanedSubchannels();
+
+	// minimum time a service may go unmentioned in FIG 0/2 before being considered hot-removed
+	static const std::chrono::seconds service_timeout;
 
 	FIC_DAB_DT utc_dt;
 	bool utc_dt_long;
@@ -345,6 +366,7 @@ public:
 
 	void Process(const uint8_t *data, size_t len);
 	void Reset();
+	void CheckServiceTimeouts();
 
 	static std::string ConvertLabelToUTF8(const FIC_LABEL& label, std::string* charset_name);
 	static std::string ConvertLanguageToString(const int value);

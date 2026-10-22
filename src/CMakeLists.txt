@@ -28,6 +28,8 @@ set(dablin_gtk_sources
     dablin_gtk.cpp
     dablin_gtk_dl_plus.cpp
     dablin_gtk_sls.cpp
+    dablin_gtk_cu_bar.cpp
+    dablin_gtk_logs.cpp
     )
 
 set(common_link_list

@@ -20,81 +20,23 @@
 
 
 
-// --- DABlinGTKSlideshowWindow -----------------------------------------------------------------
-DABlinGTKSlideshowWindow::DABlinGTKSlideshowWindow() {
-	pixbuf_waiting = Gdk::Pixbuf::create(Gdk::COLORSPACE_RGB, false, 8, 320, 240);	// default slide size
+// --- DABlinGTKSlideshowContent -----------------------------------------------------------------
+DABlinGTKSlideshowContent::DABlinGTKSlideshowContent() {
+	pixbuf_waiting = Gdk::Pixbuf::create(Gdk::COLORSPACE_RGB, false, 8, max_slide_width, max_slide_height);
 	pixbuf_waiting->fill(0x003000FF);
 
-	prev_parent_x = -1;
-	prev_parent_y = -1;
+	// a slide is at most 320x240 pixels; reserve exactly that so the box neither grows nor shrinks with slides
+	image.set_size_request(max_slide_width, max_slide_height);
+	image.set_margin_start(5);
+	image.set_margin_end(5);
+	image.set_margin_bottom(5);
 
-	set_type_hint(Gdk::WINDOW_TYPE_HINT_UTILITY);
-	set_resizable(false);
-	set_deletable(false);
-
-	add(top_grid);
-
-	top_grid.attach(image, 0, 0, 1, 1);
-	top_grid.attach_next_to(link_button, image, Gtk::POS_BOTTOM, 1, 1);
-	top_grid.attach_next_to(progress_file, link_button, Gtk::POS_BOTTOM, 1, 1);
-
-	show_all_children();
-
-	// add window key press event handler
-	signal_key_press_event().connect(sigc::mem_fun(*this, &DABlinGTKSlideshowWindow::HandleKeyPressEvent));
-	add_events(Gdk::KEY_PRESS_MASK);
+	attach(image, 0, 0, 1, 1);
+	attach_next_to(link_button, image, Gtk::POS_BOTTOM, 1, 1);
+	attach_next_to(progress_file, link_button, Gtk::POS_BOTTOM, 1, 1);
 }
 
-void DABlinGTKSlideshowWindow::TryToShow() {
-	// if already visible or no slide (awaiting), abort
-	if(get_visible() || IsEmptySlide())
-		return;
-
-	AlignToParent();
-	show();
-}
-
-void DABlinGTKSlideshowWindow::AlignToParent() {
-	int x, y, w, h, this_x, this_y;
-	get_transient_for()->get_position(x, y);
-	get_transient_for()->get_size(w, h);
-	get_position(this_x, this_y);	// event position doesn't work!
-
-	int curr_parent_x = x + w;
-	int curr_parent_y = y;
-
-	// TODO: fix multi head issue
-	if(prev_parent_x == -1 && prev_parent_y == -1) {
-		// first: align to the right of parent
-		move(curr_parent_x + 20, curr_parent_y);	// add some horizontal padding for WM decoration
-	} else {
-		// later: follow parent
-		move(curr_parent_x + (this_x - prev_parent_x), curr_parent_y + (this_y - prev_parent_y));
-	}
-
-	prev_parent_x = curr_parent_x;
-	prev_parent_y = curr_parent_y;
-}
-
-bool DABlinGTKSlideshowWindow::HandleKeyPressEvent(GdkEventKey* key_event) {
-	// events without Shift/Alt/Win, but with Control
-	if((key_event->state & (Gdk::SHIFT_MASK | Gdk::MOD1_MASK | Gdk::SUPER_MASK)) == 0 && (key_event->state & Gdk::CONTROL_MASK)) {
-		switch(key_event->keyval) {
-		case GDK_KEY_c:
-		case GDK_KEY_C:
-			// copy slide to clipboard, if not empty
-			Glib::RefPtr<Gdk::Pixbuf> pb = image.get_pixbuf();
-			if(pb != pixbuf_waiting)
-				Gtk::Clipboard::get()->set_image(pb);
-			return true;
-		}
-	}
-	return false;
-}
-
-void DABlinGTKSlideshowWindow::AwaitSlide() {
-	set_title("Slideshow...");
-
+void DABlinGTKSlideshowContent::AwaitSlide() {
 	image.set(pixbuf_waiting);
 	image.set_tooltip_text("Waiting for slide...");
 
@@ -102,7 +44,7 @@ void DABlinGTKSlideshowWindow::AwaitSlide() {
 	progress_file.hide();
 }
 
-void DABlinGTKSlideshowWindow::UpdateSlide(const MOT_FILE& slide) {
+void DABlinGTKSlideshowContent::UpdateSlide(const MOT_FILE& slide) {
 	std::string type_mime = "";
 	std::string type_display = "unknown";
 
@@ -124,12 +66,6 @@ void DABlinGTKSlideshowWindow::UpdateSlide(const MOT_FILE& slide) {
 	Glib::RefPtr<Gdk::Pixbuf> pixbuf = pixbuf_loader->get_pixbuf();
 	if(!pixbuf)
 		return;
-
-	// update title
-	std::string title = "Slideshow";
-	if(!slide.category_title.empty())
-		title = slide.category_title + " - " + title;
-	set_title(title);
 
 	// update image
 	image.set(pixbuf);
@@ -160,7 +96,7 @@ void DABlinGTKSlideshowWindow::UpdateSlide(const MOT_FILE& slide) {
 	progress_file.hide();
 }
 
-void DABlinGTKSlideshowWindow::UpdateFileProgress(const double fraction) {
+void DABlinGTKSlideshowContent::UpdateFileProgress(const double fraction) {
 	// update/show file progress
 	if(fraction == -1)
 		progress_file.pulse();	// unknown progress

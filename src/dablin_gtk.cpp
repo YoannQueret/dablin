@@ -51,8 +51,6 @@ static void usage(const char* exe) {
 					"  -w           Output RIFF WAVE with PCM to stdout instead of using SDL (useful only on Little Endian)\n"
 					"  -u           Output untouched audio stream to stdout instead of using SDL\n"
 					"  -I           Don't catch up on stream after interruption\n"
-					"  -Y           Initially disable Dynamic Label Plus (DL+)\n"
-					"  -S           Initially disable slideshow\n"
 					"  -L           Enable loose behaviour (e.g. PAD conformance)\n"
 					"  -F           Disable dynamic FIC messages (dynamic PTY, announcements)\n"
 					"  file         Input file to be played (stdin, if not specified)\n",
@@ -84,7 +82,7 @@ int main(int argc, char **argv) {
 
 	// option args
 	int c;
-	while((c = getopt(argc, argv, "hf:d:D:C:c:l:g:Gr:P:s:x:1pwuIYSLF")) != -1) {
+	while((c = getopt(argc, argv, "hf:d:D:C:c:l:g:Gr:P:s:x:1pwuILF")) != -1) {
 		switch(c) {
 		case 'h':
 			usage(argv[0]);
@@ -144,12 +142,6 @@ int main(int argc, char **argv) {
 			break;
 		case 'I':
 			options.disable_int_catch_up = true;
-			break;
-		case 'Y':
-			options.initially_disable_dl_plus = true;
-			break;
-		case 'S':
-			options.initially_disable_slideshow = true;
 			break;
 		case 'L':
 			options.loose = true;
@@ -259,13 +251,16 @@ DABlinGTK::DABlinGTK(DABlinGTKOptions options) {
 
 	dt_lto = FIC_ENSEMBLE::lto_none;
 
-	dl_plus_window.set_transient_for(*this);
-	slideshow_window.set_transient_for(*this);
+	current_audio_format_subchid = AUDIO_SERVICE::subchid_none;
+
+	logs_window.set_transient_for(*this);
 
 	ensemble_update_progress.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::EnsembleUpdateProgressEmitted));
 	ensemble_change_format.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::EnsembleChangeFormatEmitted));
 	fic_change_ensemble.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeEnsembleEmitted));
 	fic_change_service.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeServiceEmitted));
+	fic_remove_service.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICRemoveServiceEmitted));
+	fic_log_message.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICLogMessageEmitted));
 	pad_change_dynamic_label.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::PADChangeDynamicLabelEmitted));
 	pad_change_slide.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::PADChangeSlideEmitted));
 	pad_file_progress.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::PADFileProgressEmitted));
@@ -347,15 +342,97 @@ int DABlinGTK::ComboChannelsSlotCompare(const Gtk::TreeModel::iterator& a, const
 	return 0;
 }
 
-int DABlinGTK::ComboServicesSlotCompare(const Gtk::TreeModel::iterator& a, const Gtk::TreeModel::iterator& b) {
-	const LISTED_SERVICE& service_a = (LISTED_SERVICE) (*a)[combo_services_cols.col_service];
-	const LISTED_SERVICE& service_b = (LISTED_SERVICE) (*b)[combo_services_cols.col_service];
+int DABlinGTK::ServicesTableSlotCompare(const Gtk::TreeModel::iterator& a, const Gtk::TreeModel::iterator& b) {
+	const LISTED_SERVICE& service_a = (LISTED_SERVICE) (*a)[services_table_cols.col_service];
+	const LISTED_SERVICE& service_b = (LISTED_SERVICE) (*b)[services_table_cols.col_service];
 
 	if(service_a < service_b)
 		return -1;
 	if(service_b < service_a)
 		return 1;
 	return 0;
+}
+
+void DABlinGTK::RenderServiceDetailCell(Gtk::CellRenderer* renderer, const Gtk::TreeModel::iterator& it, int column_id) {
+	Gtk::CellRendererText *text_renderer = static_cast<Gtk::CellRendererText*>(renderer);
+	const LISTED_SERVICE& service = (LISTED_SERVICE) (*it)[services_table_cols.col_service];
+
+	std::string text;
+	switch(column_id) {
+	case 0:	// SubChId
+		text = std::to_string(service.audio_service.subchid);
+		break;
+	case 1:	// SID (without the "0x" prefix, to save space in the table)
+		text = StringTools::IntToHex(service.sid, 4).substr(2);
+		break;
+	case 2:	{ // Label
+		text = FICDecoder::ConvertLabelToUTF8(service.label, nullptr);
+		if(service.multi_comps)
+			text = (!service.IsPrimary() ? "» " : "") + text + (service.IsPrimary() ? " »" : "");
+		break; }
+	case 3:	{ // Short label
+		std::string label = FICDecoder::ConvertLabelToUTF8(service.label, nullptr);
+		text = FICDecoder::DeriveShortLabelUTF8(label, service.label.short_label_mask);
+		break; }
+	case 4:	// CUs
+		if(!service.subchannel.IsNone() && !service.subchannel.pl.empty())
+			text = std::to_string(service.subchannel.start) + "-" + std::to_string(service.subchannel.start + service.subchannel.size) +
+					" (" + std::to_string(service.subchannel.size) + ")";
+		break;
+	case 5:	// Protection
+		text = service.subchannel.pl;
+		break;
+	case 6:	// Bit rate
+		if(!service.subchannel.IsNone() && !service.subchannel.pl.empty())
+			text = std::to_string(service.subchannel.bitrate) + " kBit/s";
+		break;
+	case 7:	// Format (only known for the currently playing sub-channel, while it is being decoded)
+		if(service.audio_service.subchid == current_audio_format_subchid)
+			text = current_audio_format.codec;
+		break;
+	case 8:	// Samplerate (ditto)
+		if(service.audio_service.subchid == current_audio_format_subchid && current_audio_format.samplerate_khz)
+			text = std::to_string(current_audio_format.samplerate_khz) + " kHz";
+		break;
+	case 9:	// Audio mode (ditto)
+		if(service.audio_service.subchid == current_audio_format_subchid)
+			text = current_audio_format.mode;
+		break;
+	case 10:	// Language
+		if(service.subchannel.language != FIC_SUBCHANNEL::language_none)
+			text = FICDecoder::ConvertLanguageToString(service.subchannel.language);
+		break;
+	case 11:	{ // PTY
+		if(ensemble.inter_table_id != FIC_ENSEMBLE::inter_table_id_none) {
+			int pty = service.pty_dynamic != LISTED_SERVICE::pty_none ? service.pty_dynamic : service.pty_static;
+			if(pty != LISTED_SERVICE::pty_none)
+				text = FICDecoder::ConvertPTYToString(pty, ensemble.inter_table_id);
+		}
+		break; }
+	}
+
+	text_renderer->property_text() = text;
+}
+
+Gtk::ListStore::iterator DABlinGTK::UpdateServicesTableRow(const LISTED_SERVICE& service, bool* was_new) {
+	Gtk::ListStore::Children children = services_table_liststore->children();
+	Gtk::ListStore::iterator row_it = std::find_if(
+			children.begin(), children.end(),
+			[&](const Gtk::TreeModel::Row& row)->bool {
+				const LISTED_SERVICE& ls = (LISTED_SERVICE) row[services_table_cols.col_service];
+				return ls.sid == service.sid && ls.scids == service.scids;
+			}
+	);
+	bool add_new_row = row_it == children.end();
+	if(add_new_row)
+		row_it = services_table_liststore->append();
+
+	Gtk::TreeModel::Row row = *row_it;
+	row[services_table_cols.col_service] = service;
+
+	if(was_new)
+		*was_new = add_new_row;
+	return row_it;
 }
 
 void DABlinGTK::InitWidgets() {
@@ -388,73 +465,115 @@ void DABlinGTK::InitWidgets() {
 	btn_channels_stop.set_tooltip_text("Stop/resume decoding current channel/service");
 
 	frame_label_ensemble.set_label("Ensemble");
-	frame_label_ensemble.set_size_request(150, -1);
 	frame_label_ensemble.add(label_ensemble);
 	label_ensemble.set_halign(Gtk::ALIGN_START);
 	label_ensemble.set_padding(WIDGET_SPACE, WIDGET_SPACE);
+	// fixed width for "label (short_label) - EId": 16 + " (" + 8 + ")" + " - " + 4 chars, plus a cosmetic margin
+	label_ensemble.set_width_chars(16 + 2 + 8 + 1 + 3 + 4 + 4);
 
 
-	frame_combo_services.set_label("Service");
-	frame_combo_services.set_size_request(170, -1);
-	frame_combo_services.add(combo_services);
+	frame_services_table.set_label("Services details");
+	frame_services_table.set_hexpand(true);
 
-	combo_services_liststore = Gtk::ListStore::create(combo_services_cols);
-	combo_services_liststore->set_default_sort_func(sigc::mem_fun(*this, &DABlinGTK::ComboServicesSlotCompare));
-	combo_services_liststore->set_sort_column(Gtk::TreeSortable::DEFAULT_SORT_COLUMN_ID, Gtk::SORT_ASCENDING);
+	services_table_liststore = Gtk::ListStore::create(services_table_cols);
+	services_table_liststore->set_default_sort_func(sigc::mem_fun(*this, &DABlinGTK::ServicesTableSlotCompare));
+	services_table_liststore->set_sort_column(Gtk::TreeSortable::DEFAULT_SORT_COLUMN_ID, Gtk::SORT_ASCENDING);
 
-	combo_services.signal_changed().connect(sigc::mem_fun(*this, &DABlinGTK::on_combo_services));
-	combo_services.set_model(combo_services_liststore);
-	combo_services.pack_start(combo_services_cols.col_string);
+	services_table.set_model(services_table_liststore);
+	services_table.set_headers_visible(true);
+	services_table.get_selection()->signal_changed().connect(sigc::mem_fun(*this, &DABlinGTK::on_services_table_selection_changed));
 
+	static const char* services_table_column_titles[] =     {"SubChId", "SID", "Label", "Short label", "CUs", "Protection", "Bit rate", "Format", "Samplerate", "Audio", "Language", "PTY"};
+	static const int services_table_column_min_widths[] =   {      60,    50,    100,            80,     90,          80,         70,      110,           80,      70,         90,  180};
+	int services_table_min_width = 0;
+	for(size_t i = 0; i < sizeof(services_table_column_titles) / sizeof(services_table_column_titles[0]); i++) {
+		Gtk::CellRendererText *renderer = Gtk::manage(new Gtk::CellRendererText());
+		int col_index = services_table.append_column(services_table_column_titles[i], *renderer) - 1;
+		Gtk::TreeViewColumn *col = services_table.get_column(col_index);
+		col->set_cell_data_func(*renderer, sigc::bind(sigc::mem_fun(*this, &DABlinGTK::RenderServiceDetailCell), (int) i));
+		col->set_resizable(true);
+		col->set_min_width(services_table_column_min_widths[i]);
+		services_table_min_width += services_table_column_min_widths[i];
 
-	frame_label_format.set_label("Format");
-	frame_label_format.set_size_request(250, -1);
-	frame_label_format.set_hexpand(true);
-	frame_label_format.add(label_format);
-	label_format.set_halign(Gtk::ALIGN_START);
-	label_format.set_padding(WIDGET_SPACE, WIDGET_SPACE);
+		// widest PTY string ("Children's programmes"/"Soft Rhythm and Blues") is 21 chars, plus a cosmetic margin
+		if(std::string(services_table_column_titles[i]) == "PTY")
+			renderer->property_width_chars() = 21 + 3;
+	}
+
+	services_table_scroll.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC);
+	services_table_scroll.set_vexpand(true);
+	services_table_scroll.add(services_table);
+	// reserve enough room for all columns (unscrolled) and 15 services (scrollable beyond that)
+	services_table_scroll.set_min_content_width(services_table_min_width + 40);	// + scrollbar/border margin
+	services_table_scroll.set_min_content_height(15 * 26 + 30);	// ~26px/row + header
+
+	services_table_box.set_orientation(Gtk::ORIENTATION_VERTICAL);
+	services_table_box.pack_start(services_table_scroll, true, true);
+	services_table_box.pack_start(cu_bar, false, false);
+	frame_services_table.add(services_table_box);
+	frame_services_table.set_vexpand(true);
 
 	tglbtn_record.set_image_from_icon_name("media-record");
 	tglbtn_record.signal_clicked().connect(sigc::mem_fun(*this, &DABlinGTK::on_tglbtn_record));
 	tglbtn_record.set_sensitive(false);
 	tglbtn_record.set_tooltip_text("Record service");
+	tglbtn_record.set_halign(Gtk::ALIGN_START);
+	tglbtn_record.set_margin_top(10);	// align with the frames to the left, whose label strip pushes their content down
 
 	label_record.set_halign(Gtk::ALIGN_START);
 	label_record.set_padding(WIDGET_SPACE, WIDGET_SPACE);
 
-	tglbtn_slideshow.set_image_from_icon_name("video-display");
-	tglbtn_slideshow.set_active(!options.initially_disable_slideshow);
-	tglbtn_slideshow.signal_clicked().connect(sigc::mem_fun(*this, &DABlinGTK::on_tglbtn_slideshow));
-	tglbtn_slideshow.set_tooltip_text("Slideshow (if available)");
-
-	tglbtn_dl_plus.set_label("DL+");
-	tglbtn_dl_plus.set_active(!options.initially_disable_dl_plus);
-	tglbtn_dl_plus.signal_clicked().connect(sigc::mem_fun(*this, &DABlinGTK::on_tglbtn_dl_plus));
-	tglbtn_dl_plus.set_tooltip_text("Dynamic Label Plus (if available)");
+	tglbtn_logs.set_label("Logs");
+	tglbtn_logs.signal_clicked().connect(sigc::mem_fun(*this, &DABlinGTK::on_tglbtn_logs));
+	tglbtn_logs.set_tooltip_text("Log of hot changes on the ensemble");
+	tglbtn_logs.set_halign(Gtk::ALIGN_START);
+	tglbtn_logs.set_margin_top(10);
 
 	tglbtn_mute.set_image_from_icon_name("audio-volume-muted");
 	tglbtn_mute.signal_clicked().connect(sigc::mem_fun(*this, &DABlinGTK::on_tglbtn_mute));
 	tglbtn_mute.set_tooltip_text("Mute");
+	tglbtn_mute.set_halign(Gtk::ALIGN_START);
+	tglbtn_mute.set_margin_top(10);
 
 	vlmbtn.set_value(1.0);
 	vlmbtn.set_sensitive(ensemble_player->HasAudioVolumeControl());
 	vlmbtn.signal_value_changed().connect(sigc::mem_fun(*this, &DABlinGTK::on_vlmbtn));
+	vlmbtn.set_halign(Gtk::ALIGN_START);
+	vlmbtn.set_margin_top(10);
 
 	frame_label_dl.set_label("Dynamic Label");
 	frame_label_dl.set_size_request(750, 50);
 	frame_label_dl.set_sensitive(false);
 	frame_label_dl.set_hexpand(true);
-	frame_label_dl.set_vexpand(true);
 	frame_label_dl.add(label_dl);
 	label_dl.set_halign(Gtk::ALIGN_START);
 	label_dl.set_valign(Gtk::ALIGN_START);
 	label_dl.set_padding(WIDGET_SPACE, WIDGET_SPACE);
+
+	frame_dl_plus.set_label("Dynamic Label Plus");
+	frame_dl_plus.set_hexpand(true);
+	frame_dl_plus.add(dl_plus_content);
+
+	frame_slideshow.set_label("Slideshow");
+	frame_slideshow.add(slideshow_content);
+
+	dl_plus_slideshow_box.set_orientation(Gtk::ORIENTATION_HORIZONTAL);
+	dl_plus_slideshow_box.set_spacing(WIDGET_SPACE);
+	dl_plus_slideshow_box.pack_start(frame_dl_plus, true, true);
+	dl_plus_slideshow_box.pack_start(frame_slideshow, false, false);
+
+	lower_controls_box.set_orientation(Gtk::ORIENTATION_VERTICAL);
+	lower_controls_box.set_spacing(WIDGET_SPACE);
+	lower_controls_box.pack_start(frame_label_dl, false, false);
+	lower_controls_box.pack_start(dl_plus_slideshow_box, false, false);
 
 	frame_label_datetime.set_label("Local date/time");
 	frame_label_datetime.set_sensitive(false);
 	frame_label_datetime.add(label_datetime);
 	label_datetime.set_halign(Gtk::ALIGN_START);
 	label_datetime.set_padding(WIDGET_SPACE, WIDGET_SPACE);
+	// fixed width for "YYYY-MM-DD, Www - HH:MM:SS": 10 + 2 + 3 + 3 + 8 chars, plus a cosmetic margin
+	label_datetime.set_width_chars(10 + 2 + 3 + 3 + 8 + 4);
 
 	frame_label_asu.set_label("Announcement support");
 	frame_label_asu.set_sensitive(false);
@@ -469,24 +588,29 @@ void DABlinGTK::InitWidgets() {
 	top_grid.set_column_spacing(WIDGET_SPACE);
 	top_grid.set_row_spacing(WIDGET_SPACE);
 
+	// kept in its own grid (not sharing columns with the much wider services table below), so growing
+	// the window never redistributes extra width onto its columns and makes the buttons drift apart
+	header_grid.set_column_spacing(WIDGET_SPACE);
+	header_grid.set_row_spacing(WIDGET_SPACE);
+	header_grid.set_halign(Gtk::ALIGN_START);
+
+	header_grid.attach(frame_combo_channels, 0, 0, 1, 2);
+	header_grid.attach_next_to(frame_label_ensemble, frame_combo_channels, Gtk::POS_RIGHT, 1, 2);
+	header_grid.attach_next_to(frame_label_datetime, frame_label_ensemble, Gtk::POS_RIGHT, 1, 2);
+	header_grid.attach_next_to(tglbtn_logs, frame_label_datetime, Gtk::POS_RIGHT, 1, 1);
+	header_grid.attach_next_to(tglbtn_record, tglbtn_logs, Gtk::POS_RIGHT, 1, 1);
+	header_grid.attach_next_to(label_record, tglbtn_record, Gtk::POS_RIGHT, 3, 1);
+	header_grid.attach_next_to(tglbtn_mute, label_record, Gtk::POS_RIGHT, 1, 1);
+	header_grid.attach_next_to(vlmbtn, tglbtn_mute, Gtk::POS_RIGHT, 1, 1);
 
 	// add widgets
 	add(top_grid);
 
-	top_grid.attach(frame_combo_channels, 0, 0, 1, 2);
-	top_grid.attach_next_to(frame_label_ensemble, frame_combo_channels, Gtk::POS_RIGHT, 1, 2);
-	top_grid.attach_next_to(frame_combo_services, frame_label_ensemble, Gtk::POS_RIGHT, 1, 2);
-	top_grid.attach_next_to(frame_label_format, frame_combo_services, Gtk::POS_RIGHT, 1, 2);
-	top_grid.attach_next_to(tglbtn_record, frame_label_format, Gtk::POS_RIGHT, 1, 1);
-	top_grid.attach_next_to(label_record, tglbtn_record, Gtk::POS_RIGHT, 3, 1);
-	top_grid.attach_next_to(tglbtn_slideshow, tglbtn_record, Gtk::POS_BOTTOM, 1, 1);
-	top_grid.attach_next_to(tglbtn_dl_plus, tglbtn_slideshow, Gtk::POS_RIGHT, 1, 1);
-	top_grid.attach_next_to(tglbtn_mute, tglbtn_dl_plus, Gtk::POS_RIGHT, 1, 1);
-	top_grid.attach_next_to(vlmbtn, tglbtn_mute, Gtk::POS_RIGHT, 1, 1);
-	top_grid.attach_next_to(frame_label_dl, frame_combo_channels, Gtk::POS_BOTTOM, 8, 1);
-	top_grid.attach_next_to(frame_label_datetime, frame_label_dl, Gtk::POS_BOTTOM, 2, 1);
-	top_grid.attach_next_to(frame_label_asu, frame_label_datetime, Gtk::POS_RIGHT, 6, 1);
-	top_grid.attach_next_to(progress_position, frame_label_datetime, Gtk::POS_BOTTOM, 8, 1);
+	top_grid.attach(header_grid, 0, 0, 1, 1);
+	top_grid.attach_next_to(frame_services_table, header_grid, Gtk::POS_BOTTOM, 1, 1);
+	top_grid.attach_next_to(lower_controls_box, frame_services_table, Gtk::POS_BOTTOM, 1, 1);
+	top_grid.attach_next_to(frame_label_asu, lower_controls_box, Gtk::POS_BOTTOM, 1, 1);
+	top_grid.attach_next_to(progress_position, frame_label_asu, Gtk::POS_BOTTOM, 1, 1);
 
 	show_all_children();
 	progress_position.hide();	// invisible until progress updated
@@ -535,50 +659,15 @@ void DABlinGTK::AddChannel(const dab_channels_t::value_type& dab_channel, int ga
 void DABlinGTK::SetService(const LISTED_SERVICE& service) {
 	// (re)set labels/tooltips/record button
 	if(!service.IsNone()) {
-		std::string charset_name;
-		std::string label = FICDecoder::ConvertLabelToUTF8(service.label, &charset_name);
+		std::string label = FICDecoder::ConvertLabelToUTF8(service.label, nullptr);
 
 		set_title(label + " - DABlin");
 		set_icon_name(tglbtn_record.get_active() ? "media-record" : "media-playback-start");
-
-		std::string tooltip_text =
-				"Short label: \"" + FICDecoder::DeriveShortLabelUTF8(label, service.label.short_label_mask) + "\"\n"
-				"Label charset: " + charset_name + "\n"
-				"SId: " + StringTools::IntToHex(service.sid, 4) + (!service.IsPrimary() ? " (SCIdS: " + std::to_string(service.scids) + ")" : "") + "\n"
-				"SubChId: " + std::to_string(service.audio_service.subchid) + "\n"
-				"Audio type: " + (service.audio_service.dab_plus ? "DAB+" : "DAB");
-		if(ensemble.inter_table_id != FIC_ENSEMBLE::inter_table_id_none) {
-			if(service.pty_static != LISTED_SERVICE::pty_none)
-				tooltip_text += "\n" "Programme type (static): " + FICDecoder::ConvertPTYToString(service.pty_static, ensemble.inter_table_id);
-			if(service.pty_dynamic != LISTED_SERVICE::pty_none)
-				tooltip_text += "\n" "Programme type (dynamic): " + FICDecoder::ConvertPTYToString(service.pty_dynamic, ensemble.inter_table_id);
-		}
-		frame_combo_services.set_tooltip_text(tooltip_text);
-
-		if(!service.subchannel.IsNone()) {
-			tooltip_text = "";
-			if(!service.subchannel.pl.empty()) {
-				tooltip_text +=
-						"Sub-channel start: " + std::to_string(service.subchannel.start) + " CUs\n"
-						"Sub-channel size: " + std::to_string(service.subchannel.size) + " CUs\n"
-						"Protection level: " + service.subchannel.pl + "\n"
-						"Bit rate: " + std::to_string(service.subchannel.bitrate) + " kBit/s";
-			}
-			if(service.subchannel.language != FIC_SUBCHANNEL::language_none) {
-				if(!tooltip_text.empty())
-					tooltip_text += "\n";
-				tooltip_text += "Language: " + FICDecoder::ConvertLanguageToString(service.subchannel.language);
-			}
-			frame_label_format.set_tooltip_text(tooltip_text);
-		}
 
 		tglbtn_record.set_sensitive(true);
 	} else {
 		set_title("DABlin");
 		set_icon_name("media-playback-stop");
-
-		frame_combo_services.set_tooltip_text("");
-		frame_label_format.set_tooltip_text("");
 
 		tglbtn_record.set_sensitive(false);
 	}
@@ -595,19 +684,17 @@ void DABlinGTK::SetService(const LISTED_SERVICE& service) {
 
 		pad_decoder->Reset();
 
-		label_format.set_label("");
+		current_audio_format_subchid = AUDIO_SERVICE::subchid_none;
+		services_table.queue_draw();
 
 		frame_label_dl.set_sensitive(false);
 		label_dl.set_label("");
 		frame_label_dl.set_tooltip_text("");
 
-		dl_plus_window.hide();
-		dl_plus_window.ClearDLPlusInfo();
+		dl_plus_content.ClearDLPlusInfo();
 
-		if(!service.HasSLS()) {
-			slideshow_window.hide();
-			slideshow_window.ClearSlide();
-		}
+		if(!service.HasSLS())
+			slideshow_content.ClearSlide();
 
 		{
 			std::lock_guard<std::mutex> lock(rec_mutex);
@@ -628,10 +715,8 @@ void DABlinGTK::SetService(const LISTED_SERVICE& service) {
 	}
 
 	// (re)init SLS on new service (having SLS) only once
-	if(service.HasSLS() && (audio_service_changed || slideshow_window.IsEmptySlide())) {
-		slideshow_window.AwaitSlide();
-		if(tglbtn_slideshow.get_active())
-			slideshow_window.TryToShow();
+	if(service.HasSLS() && (audio_service_changed || slideshow_content.IsEmptySlide())) {
+		slideshow_content.AwaitSlide();
 		pad_decoder->SetMOTAppType(service.sls_app_type);
 	}
 }
@@ -730,11 +815,9 @@ void DABlinGTK::on_tglbtn_record() {
 
 		// get station name
 		LISTED_SERVICE service;	// default: none
-		Gtk::TreeModel::iterator row_it = combo_services.get_active();
-		if(combo_services_liststore->iter_is_valid(row_it)) {
-			Gtk::TreeModel::Row row = *row_it;
-			service = row[combo_services_cols.col_service];
-		}
+		Gtk::TreeModel::iterator row_it = services_table.get_selection()->get_selected();
+		if(row_it)
+			service = (LISTED_SERVICE) (*row_it)[services_table_cols.col_service];
 		std::string label = FICDecoder::ConvertLabelToUTF8(service.label, nullptr);
 
 		// escape forbidden '/' character
@@ -749,7 +832,7 @@ void DABlinGTK::on_tglbtn_record() {
 			// disable channel/service switch
 			combo_channels.set_sensitive(false);	// parent frame already non-sensitive, if channels not available
 			btn_channels_stop.set_sensitive(false);	// parent frame already non-sensitive, if channels not available
-			combo_services.set_sensitive(false);
+			services_table.set_sensitive(false);
 
 			set_icon_name("media-record");
 			fprintf(stderr, "DABlinGTK: recording started into '%s'\n", new_rec_filename.c_str());
@@ -802,7 +885,7 @@ void DABlinGTK::on_tglbtn_record() {
 			// enable channel/service switch
 			combo_channels.set_sensitive(true);		// parent frame already non-sensitive, if channels not available
 			btn_channels_stop.set_sensitive(true);	// parent frame already non-sensitive, if channels not available
-			combo_services.set_sensitive(true);
+			services_table.set_sensitive(true);
 		}
 	}
 }
@@ -883,18 +966,13 @@ void DABlinGTK::on_vlmbtn(double value) {
 		tglbtn_mute.clicked();
 }
 
-void DABlinGTK::on_tglbtn_dl_plus() {
-	if(tglbtn_dl_plus.get_active())
-		dl_plus_window.TryToShow();
-	else
-		dl_plus_window.hide();
-}
-
-void DABlinGTK::on_tglbtn_slideshow() {
-	if(tglbtn_slideshow.get_active())
-		slideshow_window.TryToShow();
-	else
-		slideshow_window.hide();
+void DABlinGTK::on_tglbtn_logs() {
+	if(tglbtn_logs.get_active()) {
+		logs_window.AlignToParent();
+		logs_window.show();
+	} else {
+		logs_window.hide();
+	}
 }
 
 bool DABlinGTK::on_window_delete_event(GdkEventAny* /*any_event*/) {
@@ -929,8 +1007,8 @@ bool DABlinGTK::HandleKeyPressEvent(GdkEventKey* key_event) {
 
 		// try to switch service (1 to 10, -/+)
 		int new_index;
-		if(CheckForIndexKey(key_event, combo_services.get_active_row_number(), new_index)) {
-			TrySwitch(combo_services, combo_services_liststore, new_index);
+		if(CheckForIndexKey(key_event, GetSelectedServiceIndex(), new_index)) {
+			TrySwitchService(new_index);
 			return true;
 		}
 	}
@@ -940,7 +1018,7 @@ bool DABlinGTK::HandleKeyPressEvent(GdkEventKey* key_event) {
 		// try to switch service (11 to 20)
 		int new_index;
 		if(CheckForIndexKey(key_event, -1, new_index)) {
-			TrySwitch(combo_services, combo_services_liststore, new_index + 10);
+			TrySwitchService(new_index + 10);
 			return true;
 		}
 	}
@@ -1047,12 +1125,44 @@ void DABlinGTK::TrySwitch(Gtk::ComboBox& combo, Glib::RefPtr<Gtk::ListStore>& co
 		combo.set_active(index);
 }
 
+int DABlinGTK::GetSelectedServiceIndex() {
+	Gtk::TreeModel::iterator row_it = services_table.get_selection()->get_selected();
+	if(!row_it)
+		return -1;
+
+	Gtk::TreeModel::Path path = services_table_liststore->get_path(row_it);
+	return path.empty() ? -1 : path[0];
+}
+
+void DABlinGTK::TrySwitchService(int index) {
+	// switch, if allowed and index valid
+	if(!services_table.is_sensitive() || index < 0 || index >= (signed) services_table_liststore->children().size())
+		return;
+
+	Gtk::TreeModel::Path path;
+	path.push_back(index);
+	Gtk::TreeModel::iterator row_it = services_table_liststore->get_iter(path);
+	if(row_it)
+		services_table.get_selection()->select(row_it);
+}
+
+void DABlinGTK::UpdateCUBar() {
+	std::vector<LISTED_SERVICE> services;
+	for(const Gtk::TreeModel::Row& row : services_table_liststore->children())
+		services.push_back((LISTED_SERVICE) row[services_table_cols.col_service]);
+	cu_bar.SetServices(services);
+
+	int selected_subchid = AUDIO_SERVICE::subchid_none;
+	Gtk::TreeModel::iterator current_it = services_table.get_selection()->get_selected();
+	if(current_it)
+		selected_subchid = ((LISTED_SERVICE) (*current_it)[services_table_cols.col_service]).audio_service.subchid;
+	cu_bar.SetSelectedSubchId(selected_subchid);
+}
+
 bool DABlinGTK::HandleConfigureEvent(GdkEventConfigure* /*configure_event*/) {
-	// move together with children windows
-	if(dl_plus_window.get_visible())
-		dl_plus_window.AlignToParent();
-	if(slideshow_window.get_visible())
-		slideshow_window.AlignToParent();
+	// move together with the children window
+	if(logs_window.get_visible())
+		logs_window.AlignToParent();
 	return false;
 }
 
@@ -1070,7 +1180,12 @@ void DABlinGTK::EnsembleUpdateProgressEmitted() {
 void DABlinGTK::EnsembleChangeFormatEmitted() {
 //	fprintf(stderr, "### EnsembleChangeFormatEmitted\n");
 
-	label_format.set_label(ensemble_change_format.Pop().GetSummary());
+	current_audio_format = ensemble_change_format.Pop();
+
+	// remember which sub-channel this format applies to, so the services table can show it for that row only
+	Gtk::TreeModel::iterator current_it = services_table.get_selection()->get_selected();
+	current_audio_format_subchid = current_it ? ((LISTED_SERVICE) (*current_it)[services_table_cols.col_service]).audio_service.subchid : AUDIO_SERVICE::subchid_none;
+	services_table.queue_draw();
 }
 
 void DABlinGTK::FICChangeEnsemble(const FIC_ENSEMBLE& ensemble) {
@@ -1090,10 +1205,11 @@ void DABlinGTK::FICChangeEnsembleEmitted() {
 	ensemble = fic_change_ensemble.Pop();
 
 	std::string charset_name;
-	std::string label = Glib::Markup::escape_text(FICDecoder::ConvertLabelToUTF8(ensemble.label, &charset_name));
+	std::string label_plain = FICDecoder::ConvertLabelToUTF8(ensemble.label, &charset_name);
+	std::string short_label_plain = FICDecoder::DeriveShortLabelUTF8(label_plain, ensemble.label.short_label_mask);
 
 	std::string tooltip_text =
-			"Short label: \"" + FICDecoder::DeriveShortLabelUTF8(label, ensemble.label.short_label_mask) + "\"\n"
+			"Short label: \"" + short_label_plain + "\"\n"
 			"Label charset: " + charset_name + "\n"
 			"EId: " + StringTools::IntToHex(ensemble.eid, 4) + "\n"
 			"Alarm flag: " + (ensemble.al_flag ? "true" : "false");
@@ -1103,6 +1219,12 @@ void DABlinGTK::FICChangeEnsembleEmitted() {
 		tooltip_text += "\n" "LTO: " + FICDecoder::ConvertLTOToString(ensemble.lto);
 	if(ensemble.inter_table_id != FIC_ENSEMBLE::inter_table_id_none)
 		tooltip_text += "\n" "International table ID: " + StringTools::IntToHex(ensemble.inter_table_id, 2) + " (" + FICDecoder::ConvertInterTableIDToString(ensemble.inter_table_id) + ")";
+
+	// label (short label) - EId, without the "0x" prefix
+	std::string label =
+			Glib::Markup::escape_text(label_plain) +
+			" (" + Glib::Markup::escape_text(short_label_plain) + ")" +
+			" - " + StringTools::IntToHex(ensemble.eid, 4).substr(2);
 
 	// indicate active alarm announcement
 	if(ensemble.al_flag) {
@@ -1121,28 +1243,10 @@ void DABlinGTK::FICChangeServiceEmitted() {
 //	fprintf(stderr, "### FICChangeServiceEmitted\n");
 
 	LISTED_SERVICE new_service = fic_change_service.Pop();
-
 	std::string label = FICDecoder::ConvertLabelToUTF8(new_service.label, nullptr);
-	std::string combo_label = label;
-	if(new_service.multi_comps)
-		combo_label = (!new_service.IsPrimary() ? "» " : "") + combo_label + (new_service.IsPrimary() ? " »" : "");
 
-	// get row (add new one, if needed)
-	Gtk::ListStore::Children children = combo_services_liststore->children();
-	Gtk::ListStore::iterator row_it = std::find_if(
-			children.begin(), children.end(),
-			[&](const Gtk::TreeModel::Row& row)->bool {
-				const LISTED_SERVICE& ls = (LISTED_SERVICE) row[combo_services_cols.col_service];
-				return ls.sid == new_service.sid && ls.scids == new_service.scids;
-			}
-	);
-	bool add_new_row = row_it == children.end();
-	if(add_new_row)
-		row_it = combo_services_liststore->append();
-
-	Gtk::TreeModel::Row row = *row_it;
-	row[combo_services_cols.col_string] = combo_label;
-	row[combo_services_cols.col_service] = new_service;
+	bool add_new_row;
+	Gtk::ListStore::iterator row_it = UpdateServicesTableRow(new_service, &add_new_row);
 
 	if(add_new_row) {
 		// if first found service requested, adopt service params (for possible later changes)
@@ -1154,13 +1258,43 @@ void DABlinGTK::FICChangeServiceEmitted() {
 
 		// set (initial) service
 		if(label == switch_service_label || (new_service.sid == switch_service_sid && new_service.scids == switch_service_scids))
-			combo_services.set_active(row_it);
+			services_table.get_selection()->select(row_it);
 	} else {
 		// set (updated) service
-		Gtk::ListStore::iterator current_it = combo_services.get_active();
+		Gtk::TreeModel::iterator current_it = services_table.get_selection()->get_selected();
 		if(current_it && current_it == row_it)
 			SetService(new_service);
 	}
+
+	UpdateCUBar();
+}
+
+void DABlinGTK::FICRemoveServiceEmitted() {
+	fic_service_id_t id = fic_remove_service.Pop();
+
+	Gtk::ListStore::Children children = services_table_liststore->children();
+	Gtk::ListStore::iterator row_it = std::find_if(
+			children.begin(), children.end(),
+			[&](const Gtk::TreeModel::Row& row)->bool {
+				const LISTED_SERVICE& ls = (LISTED_SERVICE) row[services_table_cols.col_service];
+				return ls.sid == id.first && ls.scids == id.second;
+			}
+	);
+	if(row_it == children.end())
+		return;
+
+	// if the removed service is currently selected, stop playback and deselect it first
+	Gtk::TreeModel::iterator current_it = services_table.get_selection()->get_selected();
+	if(current_it && current_it == row_it)
+		services_table.get_selection()->unselect_all();
+
+	services_table_liststore->erase(row_it);
+
+	UpdateCUBar();
+}
+
+void DABlinGTK::FICLogMessageEmitted() {
+	logs_window.AppendLogMessage(fic_log_message.Pop());
 }
 
 void DABlinGTK::FICChangeUTCDateTime(const FIC_DAB_DT& utc_dt) {
@@ -1212,6 +1346,9 @@ void DABlinGTK::EnsembleDoRegularWork() {
 	// if UTC date/time set and scheduled time reached, update/show/reschedule
 	if(!utc_dt_curr.IsNone() && std::chrono::steady_clock::now() >= dt_update)
 		ShowDateTime(true);
+
+	// detect services hot-removed from the ensemble (no longer listed in FIG 0/2)
+	fic_decoder->CheckServiceTimeouts();
 }
 
 void DABlinGTK::DoDateTimeUpdateEmitted() {
@@ -1242,7 +1379,9 @@ void DABlinGTK::on_combo_channels() {
 	}
 
 	EnsembleResetFIC();
-	combo_services_liststore->clear();	// TODO: prevent on_combo_services() being called for each deleted row
+	services_table_liststore->clear();	// TODO: prevent on_services_table_selection_changed() being called for each deleted row
+	logs_window.Clear();
+	UpdateCUBar();
 	ensemble_player->StopAudio();
 	label_ensemble.set_label("");
 	frame_label_ensemble.set_tooltip_text("");
@@ -1291,10 +1430,9 @@ void DABlinGTK::on_combo_channels() {
 void DABlinGTK::on_btn_channels_stop() {
 	if(combo_channels.get_active_row_number() != -1) {
 		// save state + stop
-		Gtk::TreeModel::iterator row_it = combo_services.get_active();
-		if(combo_services_liststore->iter_is_valid(row_it)) {
-			Gtk::TreeModel::Row row = *row_it;
-			LISTED_SERVICE service = row[combo_services_cols.col_service];
+		Gtk::TreeModel::iterator row_it = services_table.get_selection()->get_selected();
+		if(row_it) {
+			LISTED_SERVICE service = (LISTED_SERVICE) (*row_it)[services_table_cols.col_service];
 			resume_service_sid = service.sid;
 			resume_service_scids = service.scids;
 		} else {
@@ -1315,14 +1453,14 @@ void DABlinGTK::on_btn_channels_stop() {
 	}
 }
 
-void DABlinGTK::on_combo_services() {
+void DABlinGTK::on_services_table_selection_changed() {
 	LISTED_SERVICE service;	// default: none
-	Gtk::TreeModel::iterator row_it = combo_services.get_active();
-	if(combo_services_liststore->iter_is_valid(row_it)) {
-		Gtk::TreeModel::Row row = *row_it;
-		service = row[combo_services_cols.col_service];
-	}
+	Gtk::TreeModel::iterator row_it = services_table.get_selection()->get_selected();
+	if(row_it)
+		service = (LISTED_SERVICE) (*row_it)[services_table_cols.col_service];
 	SetService(service);
+
+	cu_bar.SetSelectedSubchId(service.audio_service.subchid);
 }
 
 void DABlinGTK::PADChangeDynamicLabelEmitted() {
@@ -1348,25 +1486,20 @@ void DABlinGTK::PADChangeDynamicLabelEmitted() {
 	}
 
 	// if present, forward DL Plus updates
-	if(!dl.dl_plus_objects.empty()) {
-		dl_plus_window.UpdateDLPlusInfo(dl);
-		if(tglbtn_dl_plus.get_active())
-			dl_plus_window.TryToShow();
-	}
+	if(!dl.dl_plus_objects.empty())
+		dl_plus_content.UpdateDLPlusInfo(dl);
 }
 
 void DABlinGTK::PADChangeSlideEmitted() {
 //	fprintf(stderr, "### PADChangeSlideEmitted\n");
 
-	slideshow_window.UpdateSlide(pad_change_slide.Pop());
-	if(tglbtn_slideshow.get_active())
-		slideshow_window.TryToShow();
+	slideshow_content.UpdateSlide(pad_change_slide.Pop());
 }
 
 void DABlinGTK::PADFileProgressEmitted() {
 //	fprintf(stderr, "### PADFileProgressEmitted\n");
 
-	slideshow_window.UpdateFileProgress(pad_file_progress.Pop());
+	slideshow_content.UpdateFileProgress(pad_file_progress.Pop());
 }
 
 void DABlinGTK::PADLengthError(size_t /*announced_xpad_len*/, size_t /*xpad_len*/) {

@@ -27,24 +27,20 @@
 
 
 
-// --- DABlinGTKSlideshowWindow -----------------------------------------------------------------
-class DABlinGTKSlideshowWindow : public Gtk::Window {
+// --- DABlinGTKSlideshowContent -----------------------------------------------------------------
+// embedded slideshow display; sized to the maximum possible slide dimensions (320x240)
+class DABlinGTKSlideshowContent : public Gtk::Grid {
 private:
-	Gtk::Grid top_grid;
 	Gtk::Image image;
 	Gtk::LinkButton link_button;
 	Gtk::ProgressBar progress_file;
 
 	Glib::RefPtr<Gdk::Pixbuf> pixbuf_waiting;
-	int prev_parent_x;
-	int prev_parent_y;
-
-	bool HandleKeyPressEvent(GdkEventKey* key_event);
 public:
-	DABlinGTKSlideshowWindow();
+	static const int max_slide_width = 320;
+	static const int max_slide_height = 240;
 
-	void TryToShow();
-	void AlignToParent();
+	DABlinGTKSlideshowContent();
 
 	void AwaitSlide();
 	void UpdateSlide(const MOT_FILE& slide);

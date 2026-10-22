@@ -20,6 +20,12 @@
 
 
 // --- FICDecoder -----------------------------------------------------------------
+const std::chrono::seconds FICDecoder::service_timeout{3};
+
+void FICDecoder::Log(const std::string& message) {
+	observer->FICLogMessage(message);
+}
+
 void FICDecoder::Reset() {
 	ensemble = FIC_ENSEMBLE();
 	services.clear();
@@ -141,6 +147,7 @@ void FICDecoder::ProcessFIG0_0(const uint8_t *data, size_t len) {
 
 		fprintf(stderr, "FICDecoder: EId 0x%04X: alarm flag: %s\n",
 				ensemble.eid, ensemble.al_flag ? "true" : "false");
+		Log("EId " + StringTools::IntToHex(ensemble.eid, 4) + ": alarm flag: " + (ensemble.al_flag ? "true" : "false"));
 
 		UpdateEnsemble();
 	}
@@ -198,6 +205,8 @@ void FICDecoder::ProcessFIG0_1(const uint8_t *data, size_t len) {
 				current_sc = sc;
 
 				fprintf(stderr, "FICDecoder: SubChId %2d: start %3zu CUs, size %3zu CUs, PL %-7s = %3d kBit/s\n", subchid, sc.start, sc.size, sc.pl.c_str(), sc.bitrate);
+				Log("SubChId " + std::to_string(subchid) + ": start " + std::to_string(sc.start) + " CUs, size " + std::to_string(sc.size) +
+						" CUs, PL " + sc.pl + " = " + std::to_string(sc.bitrate) + " kBit/s");
 
 				UpdateSubchannel(subchid);
 			}
@@ -215,6 +224,12 @@ void FICDecoder::ProcessFIG0_2(const uint8_t *data, size_t len) {
 		offset += 2;
 
 		size_t num_service_comps = data[offset++] & 0x0F;
+
+		// FIG 0/2 lists all currently valid services on every cycle, so its (re)appearance
+		// is used as the liveness signal to detect a service being hot-removed from the ensemble
+		FIC_SERVICE& live_service = GetService(sid);
+		live_service.seen_in_fig0_2 = true;
+		live_service.last_seen_fig0_2 = std::chrono::steady_clock::now();
 
 		// iterate through all service components
 		for(size_t comp = 0; comp < num_service_comps; comp++) {
@@ -243,6 +258,8 @@ void FICDecoder::ProcessFIG0_2(const uint8_t *data, size_t len) {
 								service.pri_comp_subchid = subchid;
 
 							fprintf(stderr, "FICDecoder: SId 0x%04X: audio service (SubChId %2d, %-4s, %s)\n", sid, subchid, dab_plus ? "DAB+" : "DAB", ps ? "primary" : "secondary");
+							Log("SId " + StringTools::IntToHex(sid, 4) + ": audio service (SubChId " + std::to_string(subchid) + ", " +
+									(dab_plus ? "DAB+" : "DAB") + ", " + (ps ? "primary" : "secondary") + ")");
 
 							UpdateService(service);
 						}
@@ -281,6 +298,7 @@ void FICDecoder::ProcessFIG0_5(const uint8_t *data, size_t len) {
 					current_sc.language = language;
 
 					fprintf(stderr, "FICDecoder: SubChId %2d: language '%s'\n", subchid, ConvertLanguageToString(language).c_str());
+					Log("SubChId " + std::to_string(subchid) + ": language '" + ConvertLanguageToString(language) + "'");
 
 					UpdateSubchannel(subchid);
 				}
@@ -323,6 +341,7 @@ void FICDecoder::ProcessFIG0_8(const uint8_t *data, size_t len) {
 					current_subchid = subchid;
 
 					fprintf(stderr, "FICDecoder: SId 0x%04X, SCIdS %2d: MSC service component (SubChId %2d)\n", sid, scids, subchid);
+					Log("SId " + StringTools::IntToHex(sid, 4) + ", SCIdS " + std::to_string(scids) + ": MSC service component (SubChId " + std::to_string(subchid) + ")");
 
 					UpdateService(service);
 				}
@@ -354,6 +373,8 @@ void FICDecoder::ProcessFIG0_9(const uint8_t *data, size_t len) {
 
 		fprintf(stderr, "FICDecoder: ECC: 0x%02X, LTO: %s, international table ID: 0x%02X (%s)\n",
 				ensemble.ecc, ConvertLTOToString(ensemble.lto).c_str(), ensemble.inter_table_id, ConvertInterTableIDToString(ensemble.inter_table_id).c_str());
+		Log("ECC: " + StringTools::IntToHex(ensemble.ecc, 2) + ", LTO: " + ConvertLTOToString(ensemble.lto) +
+				", international table ID: " + StringTools::IntToHex(ensemble.inter_table_id, 2) + " (" + ConvertInterTableIDToString(ensemble.inter_table_id) + ")");
 
 		UpdateEnsemble();
 
@@ -451,6 +472,7 @@ void FICDecoder::ProcessFIG0_13(const uint8_t *data, size_t len) {
 						memcpy(&sls_ua_data[0], data + offset, ua_data_length);
 
 					fprintf(stderr, "FICDecoder: SId 0x%04X, SCIdS %2d: Slideshow (%zu bytes UA data)\n", sid, scids, ua_data_length);
+					Log("SId " + StringTools::IntToHex(sid, 4) + ", SCIdS " + std::to_string(scids) + ": Slideshow (" + std::to_string(ua_data_length) + " bytes UA data)");
 
 					UpdateService(service);
 				}
@@ -497,6 +519,7 @@ void FICDecoder::ProcessFIG0_17(const uint8_t *data, size_t len) {
 				// assuming international table ID 0x01 here!
 				fprintf(stderr, "FICDecoder: SId 0x%04X: programme type (%s): '%s'\n",
 						sid, sd ? "dynamic" : "static", ConvertPTYToString(pty, 0x01).c_str());
+				Log("SId " + StringTools::IntToHex(sid, 4) + ": programme type (" + (sd ? "dynamic" : "static") + "): '" + ConvertPTYToString(pty, 0x01) + "'");
 			}
 
 			UpdateService(service);
@@ -536,6 +559,7 @@ void FICDecoder::ProcessFIG0_18(const uint8_t *data, size_t len) {
 
 			fprintf(stderr, "FICDecoder: SId 0x%04X: ASu flags 0x%04X, cluster(s) %s\n",
 					sid, asu_flags, cids_str.c_str());
+			Log("SId " + StringTools::IntToHex(sid, 4) + ": ASu flags " + StringTools::IntToHex(asu_flags, 4) + ", cluster(s) " + cids_str);
 
 			UpdateService(service);
 		}
@@ -564,6 +588,7 @@ void FICDecoder::ProcessFIG0_19(const uint8_t *data, size_t len) {
 			if(!disable_dyn_msgs) {
 				fprintf(stderr, "FICDecoder: ASw cluster 0x%02X: flags 0x%04X, SubChId %2d\n",
 						cid, asw_flags, subchid);
+				Log("ASw cluster " + StringTools::IntToHex(cid, 2) + ": flags " + StringTools::IntToHex(asw_flags, 4) + ", SubChId " + std::to_string(subchid));
 			}
 
 			UpdateEnsemble();
@@ -651,6 +676,7 @@ void FICDecoder::ProcessFIG1_0(uint16_t eid, const FIC_LABEL& label) {
 		std::string short_label_str = DeriveShortLabelUTF8(label_str, label.short_label_mask);
 		fprintf(stderr, "FICDecoder: EId 0x%04X: ensemble label '" "\x1B[32m" "%s" "\x1B[0m" "' ('" "\x1B[32m" "%s" "\x1B[0m" "')\n",
 				eid, label_str.c_str(), short_label_str.c_str());
+		Log("EId " + StringTools::IntToHex(eid, 4) + ": ensemble label '" + label_str + "' ('" + short_label_str + "')");
 
 		UpdateEnsemble();
 	}
@@ -665,6 +691,7 @@ void FICDecoder::ProcessFIG1_1(uint16_t sid, const FIC_LABEL& label) {
 		std::string short_label_str = DeriveShortLabelUTF8(label_str, label.short_label_mask);
 		fprintf(stderr, "FICDecoder: SId 0x%04X: programme service label '" "\x1B[32m" "%s" "\x1B[0m" "' ('" "\x1B[32m" "%s" "\x1B[0m" "')\n",
 				sid, label_str.c_str(), short_label_str.c_str());
+		Log("SId " + StringTools::IntToHex(sid, 4) + ": programme service label '" + label_str + "' ('" + short_label_str + "')");
 
 		UpdateService(service);
 	}
@@ -682,6 +709,7 @@ void FICDecoder::ProcessFIG1_4(uint16_t sid, int scids, const FIC_LABEL& label) 
 		std::string short_label_str = DeriveShortLabelUTF8(label_str, label.short_label_mask);
 		fprintf(stderr, "FICDecoder: SId 0x%04X, SCIdS %2d: service component label '" "\x1B[32m" "%s" "\x1B[0m" "' ('" "\x1B[32m" "%s" "\x1B[0m" "')\n",
 				sid, scids, label_str.c_str(), short_label_str.c_str());
+		Log("SId " + StringTools::IntToHex(sid, 4) + ", SCIdS " + std::to_string(scids) + ": service component label '" + label_str + "' ('" + short_label_str + "')");
 
 		UpdateService(service);
 	}
@@ -775,6 +803,60 @@ void FICDecoder::UpdateListedService(const FIC_SERVICE& service, int scids, bool
 
 	// forward to observer
 	observer->FICChangeService(ls);
+}
+
+void FICDecoder::CheckServiceTimeouts() {
+	// detect services hot-removed from the ensemble: FIG 0/2 lists the complete,
+	// currently valid service table on every cycle, so any service that was
+	// seen before but stays absent from it for longer than service_timeout
+	// is considered gone (vs. e.g. a few corrupted/missing FIBs)
+	auto now = std::chrono::steady_clock::now();
+
+	for(fic_services_t::iterator it = services.begin(); it != services.end();) {
+		const FIC_SERVICE& service = it->second;
+
+		if(service.seen_in_fig0_2 && now - service.last_seen_fig0_2 > service_timeout) {
+			fprintf(stderr, "FICDecoder: SId 0x%04X: no longer listed in FIG 0/2 for %lds - removing (hot removal)\n",
+					service.sid, (long) std::chrono::duration_cast<std::chrono::seconds>(service_timeout).count());
+			Log("SId " + StringTools::IntToHex(service.sid, 4) + ": no longer listed in FIG 0/2 for " +
+					std::to_string(std::chrono::duration_cast<std::chrono::seconds>(service_timeout).count()) + "s - removing (hot removal)");
+
+			RemoveService(service);
+			it = services.erase(it);
+		} else {
+			++it;
+		}
+	}
+
+	PruneOrphanedSubchannels();
+}
+
+void FICDecoder::RemoveService(const FIC_SERVICE& service) {
+	// mirror the fan-out done in UpdateService()/UpdateListedService(), so every listed
+	// row (primary + secondary components) that may have been shown gets removed again
+	observer->FICRemoveService(fic_service_id_t(service.sid, int(LISTED_SERVICE::scids_none)));
+
+	for(const comp_defs_t::value_type& comp_def : service.comp_defs) {
+		if(comp_def.second == service.pri_comp_subchid)
+			continue;
+		observer->FICRemoveService(fic_service_id_t(service.sid, comp_def.first));
+	}
+}
+
+void FICDecoder::PruneOrphanedSubchannels() {
+	// drop sub-channel info no longer referenced by any remaining service, so a later
+	// reuse of the same SubChId starts from a clean state
+	std::set<int> used_subchids;
+	for(const fic_services_t::value_type& service : services)
+		for(const audio_comps_t::value_type& audio_comp : service.second.audio_comps)
+			used_subchids.insert(audio_comp.first);
+
+	for(fic_subchannels_t::iterator it = subchannels.begin(); it != subchannels.end();) {
+		if(used_subchids.find(it->first) == used_subchids.end())
+			it = subchannels.erase(it);
+		else
+			++it;
+	}
 }
 
 int FICDecoder::GetSLSAppType(const ua_data_t& ua_data) {

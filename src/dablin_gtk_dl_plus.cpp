@@ -20,36 +20,21 @@
 
 
 
-// --- DABlinGTKDLPlusWindow -----------------------------------------------------------------
-DABlinGTKDLPlusWindow::DABlinGTKDLPlusWindow() {
-	prev_parent_x = -1;
-	prev_parent_y = -1;
-
-	set_title("Dynamic Label Plus");
-	set_type_hint(Gdk::WINDOW_TYPE_HINT_UTILITY);
-	set_resizable(false);
-	set_deletable(false);
-
+// --- DABlinGTKDLPlusContent -----------------------------------------------------------------
+DABlinGTKDLPlusContent::DABlinGTKDLPlusContent() {
 	list_dl_plus_liststore = Gtk::ListStore::create(list_dl_plus_cols);
 	list_dl_plus_liststore->set_sort_column(list_dl_plus_cols.col_content_type, Gtk::SORT_ASCENDING);
 
 	list_dl_plus.set_model(list_dl_plus_liststore);
-	list_dl_plus.set_size_request(250, -1);
-	list_dl_plus.insert_column_with_data_func(-1, "Content type", cell_renderer_text, sigc::mem_fun(*this, &DABlinGTKDLPlusWindow::RenderContentType));
-	list_dl_plus.insert_column_with_data_func(-1, "Text", cell_renderer_text, sigc::mem_fun(*this, &DABlinGTKDLPlusWindow::RenderText));
+	list_dl_plus.set_hexpand(true);
+	list_dl_plus.insert_column_with_data_func(-1, "Content type", cell_renderer_text, sigc::mem_fun(*this, &DABlinGTKDLPlusContent::RenderContentType));
+	list_dl_plus.insert_column_with_data_func(-1, "Text", cell_renderer_text, sigc::mem_fun(*this, &DABlinGTKDLPlusContent::RenderText));
 
-	add(top_grid);
-
-	top_grid.attach(list_dl_plus, 0, 0, 1, 1);
-
-	show_all_children();
-
-	// add window key press event handler
-	signal_key_press_event().connect(sigc::mem_fun(*this, &DABlinGTKDLPlusWindow::HandleKeyPressEvent));
-	add_events(Gdk::KEY_PRESS_MASK);
+	set_hexpand(true);
+	attach(list_dl_plus, 0, 0, 1, 1);
 }
 
-void DABlinGTKDLPlusWindow::RenderContentType(Gtk::CellRenderer* cell, const Gtk::TreeModel::iterator& iter) {
+void DABlinGTKDLPlusContent::RenderContentType(Gtk::CellRenderer* cell, const Gtk::TreeModel::iterator& iter) {
 	Gtk::CellRendererText *rt = (Gtk::CellRendererText*) cell;
 
 	int content_type = (*iter)[list_dl_plus_cols.col_content_type];
@@ -62,7 +47,7 @@ void DABlinGTKDLPlusWindow::RenderContentType(Gtk::CellRenderer* cell, const Gtk
 	rt->property_weight() = Pango::WEIGHT_NORMAL;
 }
 
-void DABlinGTKDLPlusWindow::RenderText(Gtk::CellRenderer* cell, const Gtk::TreeModel::iterator& iter) {
+void DABlinGTKDLPlusContent::RenderText(Gtk::CellRenderer* cell, const Gtk::TreeModel::iterator& iter) {
 	Gtk::CellRendererText *rt = (Gtk::CellRendererText*) cell;
 
 	int content_type = (*iter)[list_dl_plus_cols.col_content_type];
@@ -85,56 +70,7 @@ void DABlinGTKDLPlusWindow::RenderText(Gtk::CellRenderer* cell, const Gtk::TreeM
 	rt->property_weight() = content_type < 12 ? Pango::WEIGHT_BOLD : Pango::WEIGHT_NORMAL;	// highlight ITEM objects
 }
 
-void DABlinGTKDLPlusWindow::TryToShow() {
-	// if already visible or no DL Plus info present, abort
-	if(get_visible() || get_tooltip_text().empty())
-		return;
-
-	AlignToParent();
-	show();
-}
-
-void DABlinGTKDLPlusWindow::AlignToParent() {
-	int x, y, w, h, this_x, this_y;
-	get_transient_for()->get_position(x, y);
-	get_transient_for()->get_size(w, h);
-	get_position(this_x, this_y);	// event position doesn't work!
-
-	int curr_parent_x = x;
-	int curr_parent_y = y + h;
-
-	// TODO: fix multi head issue
-	if(prev_parent_x == -1 && prev_parent_y == -1) {
-		// first: align to the bottom of parent
-		move(curr_parent_x, curr_parent_y + 40);	// add some vertical padding for WM decoration
-	} else {
-		// later: follow parent
-		move(curr_parent_x + (this_x - prev_parent_x), curr_parent_y + (this_y - prev_parent_y));
-	}
-
-	prev_parent_x = curr_parent_x;
-	prev_parent_y = curr_parent_y;
-}
-
-bool DABlinGTKDLPlusWindow::HandleKeyPressEvent(GdkEventKey* key_event) {
-	// events without Shift/Alt/Win, but with Control
-	if((key_event->state & (Gdk::SHIFT_MASK | Gdk::MOD1_MASK | Gdk::SUPER_MASK)) == 0 && (key_event->state & Gdk::CONTROL_MASK)) {
-		switch(key_event->keyval) {
-		case GDK_KEY_c:
-		case GDK_KEY_C:
-			// copy DL Plus object text, if entry selected
-			const Gtk::TreeModel::iterator& row_it = list_dl_plus.get_selection()->get_selected();
-			if(list_dl_plus_liststore->iter_is_valid(row_it)) {
-				std::string text = (*row_it)[list_dl_plus_cols.col_text];
-				Gtk::Clipboard::get()->set_text(text);
-			}
-			return true;
-		}
-	}
-	return false;
-}
-
-void DABlinGTKDLPlusWindow::UpdateDLPlusInfo(const DL_STATE& dl) {
+void DABlinGTKDLPlusContent::UpdateDLPlusInfo(const DL_STATE& dl) {
 	// add/update DL Plus objects
 	Gtk::ListStore::Children children = list_dl_plus_liststore->children();
 
@@ -179,7 +115,7 @@ void DABlinGTKDLPlusWindow::UpdateDLPlusInfo(const DL_STATE& dl) {
 	);
 }
 
-void DABlinGTKDLPlusWindow::ClearDLPlusInfo() {
+void DABlinGTKDLPlusContent::ClearDLPlusInfo() {
 	list_dl_plus_liststore->clear();
 	list_dl_plus.columns_autosize();
 	list_dl_plus.check_resize();	// prevent resizing bug

@@ -44,27 +44,18 @@ public:
 };
 
 
-// --- DABlinGTKDLPlusWindow -----------------------------------------------------------------
-class DABlinGTKDLPlusWindow : public Gtk::Window {
+// --- DABlinGTKDLPlusContent -----------------------------------------------------------------
+// embedded Dynamic Label Plus display; stretches to the full width of its container
+class DABlinGTKDLPlusContent : public Gtk::Grid {
 private:
-	Gtk::Grid top_grid;
-
 	DABlinGTKDLPlusObjectColumns list_dl_plus_cols;
 	Glib::RefPtr<Gtk::ListStore> list_dl_plus_liststore;
 	Gtk::TreeView list_dl_plus;
 	Gtk::CellRendererText cell_renderer_text;
 	void RenderContentType(Gtk::CellRenderer* cell, const Gtk::TreeModel::iterator& iter);
 	void RenderText(Gtk::CellRenderer* cell, const Gtk::TreeModel::iterator& iter);
-
-	int prev_parent_x;
-	int prev_parent_y;
-
-	bool HandleKeyPressEvent(GdkEventKey* key_event);
 public:
-	DABlinGTKDLPlusWindow();
-
-	void TryToShow();
-	void AlignToParent();
+	DABlinGTKDLPlusContent();
 
 	void UpdateDLPlusInfo(const DL_STATE& dl);
 	void ClearDLPlusInfo();
