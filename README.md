@@ -11,7 +11,7 @@ Label and MOT Slideshow (if used by the selected service).
 ## Screenshots
 
 ### GTK GUI version
-![Screenshot of the GTK GUI version](https://basicmaster.de/dab/DABlin.png)
+![Screenshot of the GTK GUI version](doc/DABlin.png)
 
 ### Console version
 ![Screenshot of the console version](https://basicmaster.de/dab/DABlin_console.png)
