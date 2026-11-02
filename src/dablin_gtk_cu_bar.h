@@ -31,6 +31,8 @@ class DABlinGTKCUBar : public Gtk::DrawingArea {
 private:
 	struct Entry {
 		int subchid;
+		uint16_t sid;
+		int scids;
 		size_t start;
 		size_t size;
 	};
@@ -39,6 +41,7 @@ private:
 	int selected_subchid;
 
 	bool on_draw(const Cairo::RefPtr<Cairo::Context>& cr) override;
+	bool on_button_press_event(GdkEventButton* event) override;
 public:
 	static const size_t total_cus = 864;
 
@@ -46,6 +49,9 @@ public:
 
 	void SetServices(const std::vector<LISTED_SERVICE>& services);
 	void SetSelectedSubchId(int subchid);
+
+	// emitted with (sid, scids) when the user clicks a service's block
+	sigc::signal<void, uint16_t, int> signal_service_clicked;
 };
 
 #endif /* DABLIN_GTK_CU_BAR_H_ */

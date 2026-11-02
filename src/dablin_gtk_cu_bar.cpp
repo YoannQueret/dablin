@@ -22,9 +22,11 @@
 
 // --- DABlinGTKCUBar -----------------------------------------------------------------
 DABlinGTKCUBar::DABlinGTKCUBar() : selected_subchid(-1) {
-	set_size_request(-1, 36);
+	set_size_request(-1, 44);
 	set_hexpand(true);
-	set_tooltip_text("Capacity Unit occupation (864 CUs per CIF)");
+	set_tooltip_text("Capacity Unit occupation (864 CUs per CIF) - click a service to play it");
+
+	add_events(Gdk::BUTTON_PRESS_MASK);
 }
 
 void DABlinGTKCUBar::SetServices(const std::vector<LISTED_SERVICE>& services) {
@@ -42,6 +44,8 @@ void DABlinGTKCUBar::SetServices(const std::vector<LISTED_SERVICE>& services) {
 
 		Entry entry;
 		entry.subchid = subchid;
+		entry.sid = service.sid;
+		entry.scids = service.scids;
 		entry.start = service.subchannel.start;
 		entry.size = service.subchannel.size;
 		entries.push_back(entry);
@@ -89,20 +93,57 @@ bool DABlinGTKCUBar::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
 		cr->set_line_width(1);
 		cr->stroke();
 
-		// CU count, clipped to the block so it never bleeds into the next one
+		// SubChId/SID (smaller font) above the CU count, clipped to the block so nothing bleeds into the next one
 		cr->save();
 		cr->rectangle(x0, 0, x1 - x0, height);
 		cr->clip();
 
-		Glib::RefPtr<Pango::Layout> layout = create_pango_layout(std::to_string(entry.size));
-		int text_width, text_height;
-		layout->get_pixel_size(text_width, text_height);
+		Pango::FontDescription small_font = get_pango_context()->get_font_description();
+		small_font.set_size(small_font.get_size() * 0.7);
+
+		Glib::RefPtr<Pango::Layout> header_layout = create_pango_layout(
+				std::to_string(entry.subchid) + " · " + StringTools::IntToHex(entry.sid, 4).substr(2));
+		header_layout->set_font_description(small_font);
+		int header_width, header_height;
+		header_layout->get_pixel_size(header_width, header_height);
+
+		Glib::RefPtr<Pango::Layout> count_layout = create_pango_layout(std::to_string(entry.size));
+		int count_width, count_height;
+		count_layout->get_pixel_size(count_width, count_height);
+
+		double content_height = header_height + count_height;
+		double y = (height - content_height) / 2;
 
 		cr->set_source_rgb(0.1, 0.1, 0.1);
-		cr->move_to(x0 + (x1 - x0 - text_width) / 2, (height - text_height) / 2);
-		layout->show_in_cairo_context(cr);
+		cr->move_to(x0 + (x1 - x0 - header_width) / 2, y);
+		header_layout->show_in_cairo_context(cr);
+
+		cr->move_to(x0 + (x1 - x0 - count_width) / 2, y + header_height);
+		count_layout->show_in_cairo_context(cr);
 
 		cr->restore();
+	}
+
+	return true;
+}
+
+bool DABlinGTKCUBar::on_button_press_event(GdkEventButton* event) {
+	if(event->type != GDK_BUTTON_PRESS || event->button != 1)
+		return false;
+
+	Gtk::Allocation allocation = get_allocation();
+	const double width = allocation.get_width();
+
+	for(const Entry& entry : entries) {
+		double x0 = width * entry.start / total_cus;
+		double x1 = width * (entry.start + entry.size) / total_cus;
+		if(x1 > width)
+			x1 = width;
+
+		if(event->x >= x0 && event->x < x1) {
+			signal_service_clicked.emit(entry.sid, entry.scids);
+			break;
+		}
 	}
 
 	return true;

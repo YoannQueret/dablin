@@ -510,6 +510,7 @@ void DABlinGTK::InitWidgets() {
 	services_table_box.set_orientation(Gtk::ORIENTATION_VERTICAL);
 	services_table_box.pack_start(services_table_scroll, true, true);
 	services_table_box.pack_start(cu_bar, false, false);
+	cu_bar.signal_service_clicked.connect(sigc::mem_fun(*this, &DABlinGTK::on_cu_bar_service_clicked));
 	frame_services_table.add(services_table_box);
 	frame_services_table.set_vexpand(true);
 
@@ -1461,6 +1462,19 @@ void DABlinGTK::on_services_table_selection_changed() {
 	SetService(service);
 
 	cu_bar.SetSelectedSubchId(service.audio_service.subchid);
+}
+
+void DABlinGTK::on_cu_bar_service_clicked(uint16_t sid, int scids) {
+	Gtk::ListStore::Children children = services_table_liststore->children();
+	Gtk::ListStore::iterator row_it = std::find_if(
+			children.begin(), children.end(),
+			[&](const Gtk::TreeModel::Row& row)->bool {
+				const LISTED_SERVICE& ls = (LISTED_SERVICE) row[services_table_cols.col_service];
+				return ls.sid == sid && ls.scids == scids;
+			}
+	);
+	if(row_it != children.end())
+		services_table.get_selection()->select(row_it);
 }
 
 void DABlinGTK::PADChangeDynamicLabelEmitted() {

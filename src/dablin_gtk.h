@@ -297,6 +297,7 @@ private:
 	void on_tglbtn_logs();
 	void on_combo_channels();
 	void on_services_table_selection_changed();
+	void on_cu_bar_service_clicked(uint16_t sid, int scids);
 	bool on_window_delete_event(GdkEventAny* any_event);
 
 	bool HandleKeyPressEvent(GdkEventKey* key_event);
