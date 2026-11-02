@@ -18,6 +18,8 @@
 
 #include "dablin_gtk.h"
 
+#include "ecc_countries.h"
+
 static DABlinGTK *dablin = nullptr;
 
 static void break_handler(int) {
@@ -366,44 +368,48 @@ void DABlinGTK::RenderServiceDetailCell(Gtk::CellRenderer* renderer, const Gtk::
 	case 1:	// SID (without the "0x" prefix, to save space in the table)
 		text = StringTools::IntToHex(service.sid, 4).substr(2);
 		break;
-	case 2:	{ // Label
+	case 2:	// ECC (without the "0x" prefix), only shown if it differs from the ensemble's own (FIG 0/9 exception)
+		if(service.ecc != LISTED_SERVICE::ecc_none)
+			text = StringTools::IntToHex(service.ecc, 2).substr(2);
+		break;
+	case 3:	{ // Label
 		text = FICDecoder::ConvertLabelToUTF8(service.label, nullptr);
 		if(service.multi_comps)
 			text = (!service.IsPrimary() ? "» " : "") + text + (service.IsPrimary() ? " »" : "");
 		break; }
-	case 3:	{ // Short label
+	case 4:	{ // Short label
 		std::string label = FICDecoder::ConvertLabelToUTF8(service.label, nullptr);
 		text = FICDecoder::DeriveShortLabelUTF8(label, service.label.short_label_mask);
 		break; }
-	case 4:	// CUs
+	case 5:	// CUs
 		if(!service.subchannel.IsNone() && !service.subchannel.pl.empty())
 			text = std::to_string(service.subchannel.start) + "-" + std::to_string(service.subchannel.start + service.subchannel.size) +
 					" (" + std::to_string(service.subchannel.size) + ")";
 		break;
-	case 5:	// Protection
+	case 6:	// Protection
 		text = service.subchannel.pl;
 		break;
-	case 6:	// Bit rate
+	case 7:	// Bit rate
 		if(!service.subchannel.IsNone() && !service.subchannel.pl.empty())
 			text = std::to_string(service.subchannel.bitrate) + " kBit/s";
 		break;
-	case 7:	// Format (only known for the currently playing sub-channel, while it is being decoded)
+	case 8:	// Format (only known for the currently playing sub-channel, while it is being decoded)
 		if(service.audio_service.subchid == current_audio_format_subchid)
 			text = current_audio_format.codec;
 		break;
-	case 8:	// Samplerate (ditto)
+	case 9:	// Samplerate (ditto)
 		if(service.audio_service.subchid == current_audio_format_subchid && current_audio_format.samplerate_khz)
 			text = std::to_string(current_audio_format.samplerate_khz) + " kHz";
 		break;
-	case 9:	// Audio mode (ditto)
+	case 10:	// Audio mode (ditto)
 		if(service.audio_service.subchid == current_audio_format_subchid)
 			text = current_audio_format.mode;
 		break;
-	case 10:	// Language
+	case 11:	// Language
 		if(service.subchannel.language != FIC_SUBCHANNEL::language_none)
 			text = FICDecoder::ConvertLanguageToString(service.subchannel.language);
 		break;
-	case 11:	{ // PTY
+	case 12:	{ // PTY
 		if(ensemble.inter_table_id != FIC_ENSEMBLE::inter_table_id_none) {
 			int pty = service.pty_dynamic != LISTED_SERVICE::pty_none ? service.pty_dynamic : service.pty_static;
 			if(pty != LISTED_SERVICE::pty_none)
@@ -413,6 +419,42 @@ void DABlinGTK::RenderServiceDetailCell(Gtk::CellRenderer* renderer, const Gtk::
 	}
 
 	text_renderer->property_text() = text;
+}
+
+bool DABlinGTK::on_services_table_query_tooltip(int x, int y, bool keyboard_tooltip, const Glib::RefPtr<Gtk::Tooltip>& tooltip) {
+	if(keyboard_tooltip)
+		return false;
+
+	// query-tooltip reports widget coordinates (including the header row), while
+	// get_path_at_pos expects bin window coordinates - they must be converted first
+	int bin_x, bin_y;
+	services_table.convert_widget_to_bin_window_coords(x, y, bin_x, bin_y);
+
+	Gtk::TreeModel::Path path;
+	Gtk::TreeViewColumn *column;
+	int cell_x, cell_y;
+	if(!services_table.get_path_at_pos(bin_x, bin_y, path, column, cell_x, cell_y))
+		return false;
+
+	Gtk::TreeModel::iterator it = services_table_liststore->get_iter(path);
+	if(!it)
+		return false;
+	const LISTED_SERVICE& service = (LISTED_SERVICE) (*it)[services_table_cols.col_service];
+
+	// row-wide details - more can be added here later
+	std::string text = "SID: " + StringTools::IntToHex(service.sid, 4).substr(2);
+
+	int ecc = service.ecc != LISTED_SERVICE::ecc_none ? service.ecc : ensemble.ecc;
+	if(ecc != FIC_ENSEMBLE::ecc_none) {
+		text += "\n" "ECC: " + StringTools::IntToHex(ecc, 2).substr(2);
+		const char *country = LookupECCCountry(ecc, service.sid >> 12);
+		if(country)
+			text += " (" + std::string(country) + ")";
+	}
+
+	tooltip->set_text(text);
+	services_table.set_tooltip_row(tooltip, path);
+	return true;
 }
 
 Gtk::ListStore::iterator DABlinGTK::UpdateServicesTableRow(const LISTED_SERVICE& service, bool* was_new) {
@@ -484,8 +526,8 @@ void DABlinGTK::InitWidgets() {
 	services_table.set_headers_visible(true);
 	services_table.get_selection()->signal_changed().connect(sigc::mem_fun(*this, &DABlinGTK::on_services_table_selection_changed));
 
-	static const char* services_table_column_titles[] =     {"SubChId", "SID", "Label", "Short label", "CUs", "Protection", "Bit rate", "Format", "Samplerate", "Audio", "Language", "PTY"};
-	static const int services_table_column_min_widths[] =   {      60,    50,    100,            80,     90,          80,         70,      110,           80,      70,         90,  180};
+	static const char* services_table_column_titles[] =     {"SubChId", "SID", "ECC", "Label", "Short label", "CUs", "Protection", "Bit rate", "Format", "Samplerate", "Audio", "Language", "PTY"};
+	static const int services_table_column_min_widths[] =   {      60,    50,     50,    100,            80,     90,          80,         70,      110,           80,      70,         90,  180};
 	int services_table_min_width = 0;
 	for(size_t i = 0; i < sizeof(services_table_column_titles) / sizeof(services_table_column_titles[0]); i++) {
 		Gtk::CellRendererText *renderer = Gtk::manage(new Gtk::CellRendererText());
@@ -500,6 +542,9 @@ void DABlinGTK::InitWidgets() {
 		if(std::string(services_table_column_titles[i]) == "PTY")
 			renderer->property_width_chars() = 21 + 3;
 	}
+
+	services_table.set_has_tooltip(true);
+	services_table.signal_query_tooltip().connect(sigc::mem_fun(*this, &DABlinGTK::on_services_table_query_tooltip));
 
 	services_table_scroll.set_policy(Gtk::POLICY_AUTOMATIC, Gtk::POLICY_AUTOMATIC);
 	services_table_scroll.set_vexpand(true);
@@ -1224,10 +1269,14 @@ void DABlinGTK::FICChangeEnsembleEmitted() {
 	std::string tooltip_text =
 			"Short label: \"" + short_label_plain + "\"\n"
 			"Label charset: " + charset_name + "\n"
-			"EId: " + StringTools::IntToHex(ensemble.eid, 4) + "\n"
+			"EId: " + StringTools::IntToHex(ensemble.eid, 4).substr(2) + "\n"
 			"Alarm flag: " + (ensemble.al_flag ? "true" : "false");
-	if(ensemble.ecc != FIC_ENSEMBLE::ecc_none)
-		tooltip_text += "\n" "ECC: " + StringTools::IntToHex(ensemble.ecc, 2);
+	if(ensemble.ecc != FIC_ENSEMBLE::ecc_none) {
+		tooltip_text += "\n" "ECC: " + StringTools::IntToHex(ensemble.ecc, 2).substr(2);
+		const char *country = LookupECCCountry(ensemble.ecc, ensemble.eid >> 12);
+		if(country)
+			tooltip_text += " (" + std::string(country) + ")";
+	}
 	if(ensemble.lto != FIC_ENSEMBLE::lto_none)
 		tooltip_text += "\n" "LTO: " + FICDecoder::ConvertLTOToString(ensemble.lto);
 	if(ensemble.inter_table_id != FIC_ENSEMBLE::inter_table_id_none)

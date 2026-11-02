@@ -358,17 +358,21 @@ void FICDecoder::ProcessFIG0_8(const uint8_t *data, size_t len) {
 
 void FICDecoder::ProcessFIG0_9(const uint8_t *data, size_t len) {
 	// FIG 0/9 - Time and country identifier - Country, LTO and International table
-	// ensemble ECC/LTO and international table ID only
+	// ensemble ECC/LTO/international table ID, plus optional extended fields listing
+	// services whose ECC differs from the ensemble's (bit 7 of the first byte: Ext)
 
 	if(len < 3)
 		return;
+
+	bool ext = data[0] & 0x80;
 
 	FIC_ENSEMBLE new_ensemble = ensemble;
 	new_ensemble.lto = (data[0] & 0x20 ? -1 : 1) * (data[0] & 0x1F);
 	new_ensemble.ecc = data[1];
 	new_ensemble.inter_table_id = data[2];
 
-	if(ensemble != new_ensemble) {
+	bool ensemble_changed = ensemble != new_ensemble;
+	if(ensemble_changed) {
 		ensemble = new_ensemble;
 
 		fprintf(stderr, "FICDecoder: ECC: 0x%02X, LTO: %s, international table ID: 0x%02X (%s)\n",
@@ -378,11 +382,48 @@ void FICDecoder::ProcessFIG0_9(const uint8_t *data, size_t len) {
 
 		UpdateEnsemble();
 
-		// update services that changes may affect
+		// update services that changes to the ensemble's own ECC/table may affect
 		for(const fic_services_t::value_type& service : services) {
 			const FIC_SERVICE& s = service.second;
 			if(s.pty_static != FIC_SERVICE::pty_none || s.pty_dynamic != FIC_SERVICE::pty_none)
 				UpdateService(s);
+		}
+	}
+
+	// parse per-service ECC exceptions, if any; each subfield is: 1 byte (top 2 bits: number
+	// of SIds, 0-3) + 1 byte ECC + that many 16-bit SIds - repeated until the FIG is exhausted
+	std::set<uint16_t> excepted_sids;
+	if(ext) {
+		for(size_t offset = 3; offset + 2 <= len;) {
+			int num_sids = data[offset] >> 6;
+			int subfield_ecc = data[offset + 1];
+			offset += 2;
+
+			for(int i = 0; i < num_sids && offset + 2 <= len; i++) {
+				uint16_t sid = data[offset] << 8 | data[offset + 1];
+				offset += 2;
+
+				excepted_sids.insert(sid);
+
+				FIC_SERVICE& service = GetService(sid);
+				if(service.ecc != subfield_ecc) {
+					service.ecc = subfield_ecc;
+
+					fprintf(stderr, "FICDecoder: SId 0x%04X: ECC 0x%02X\n", sid, subfield_ecc);
+					Log("SId " + StringTools::IntToHex(sid, 4) + ": ECC " + StringTools::IntToHex(subfield_ecc, 2).substr(2));
+
+					UpdateService(service);
+				}
+			}
+		}
+	}
+
+	// any service no longer listed as an exception is back to the ensemble's own ECC
+	for(fic_services_t::value_type& kv : services) {
+		FIC_SERVICE& service = kv.second;
+		if(service.ecc != FIC_SERVICE::ecc_none && excepted_sids.find(service.sid) == excepted_sids.end()) {
+			service.ecc = FIC_SERVICE::ecc_none;
+			UpdateService(service);
 		}
 	}
 }
@@ -766,6 +807,7 @@ void FICDecoder::UpdateListedService(const FIC_SERVICE& service, int scids, bool
 	ls.pty_dynamic = service.pty_dynamic;
 	ls.asu_flags = service.asu_flags;
 	ls.cids = service.cids;
+	ls.ecc = service.ecc;
 	ls.pri_comp_subchid = service.pri_comp_subchid;
 	ls.multi_comps = multi_comps;
 

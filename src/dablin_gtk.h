@@ -259,6 +259,7 @@ private:
 	int GetSelectedServiceIndex();
 	void TrySwitchService(int index);
 	void UpdateCUBar();
+	bool on_services_table_query_tooltip(int x, int y, bool keyboard_tooltip, const Glib::RefPtr<Gtk::Tooltip>& tooltip);
 
 	Gtk::Box lower_controls_box;
 

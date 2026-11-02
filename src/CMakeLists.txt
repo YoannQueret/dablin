@@ -31,6 +31,7 @@ set(dablin_gtk_sources
     dablin_gtk_cu_bar.cpp
     dablin_gtk_logs.cpp
     dablin_gtk_level_meter.cpp
+    ecc_countries.cpp
     )
 
 set(common_link_list

@@ -200,6 +200,9 @@ struct FIC_SERVICE {
 	uint16_t asu_flags;
 	cids_t cids;
 
+	// ECC, if it differs from the ensemble's own (FIG 0/9 extended field) - ecc_none if not excepted
+	int ecc;
+
 	// components
 	audio_comps_t audio_comps;		// from FIG 0/2 : SubChId -> AUDIO_SERVICE
 	comp_defs_t comp_defs;			// from FIG 0/8 : SCIdS -> SubChId
@@ -220,7 +223,9 @@ struct FIC_SERVICE {
 
 	static const int asu_flags_none = 0x0000;
 
-	FIC_SERVICE() : sid(sid_none), pri_comp_subchid(pri_comp_subchid_none), pty_static(pty_none), pty_dynamic(pty_none), asu_flags(asu_flags_none), seen_in_fig0_2(false) {}
+	static const int ecc_none = -1;
+
+	FIC_SERVICE() : sid(sid_none), pri_comp_subchid(pri_comp_subchid_none), pty_static(pty_none), pty_dynamic(pty_none), asu_flags(asu_flags_none), ecc(ecc_none), seen_in_fig0_2(false) {}
 };
 
 struct LISTED_SERVICE {
@@ -234,6 +239,7 @@ struct LISTED_SERVICE {
 	int sls_app_type;
 	uint16_t asu_flags;
 	cids_t cids;
+	int ecc;	// ecc_none, unless this service's ECC differs from the ensemble's
 
 	int pri_comp_subchid;	// only used for sorting
 	bool multi_comps;
@@ -251,6 +257,8 @@ struct LISTED_SERVICE {
 	static const int sls_app_type_none = -1;
 	bool HasSLS() const {return sls_app_type != sls_app_type_none;}
 
+	static const int ecc_none = -1;
+
 	LISTED_SERVICE() :
 		sid(sid_none),
 		scids(scids_none),
@@ -258,6 +266,7 @@ struct LISTED_SERVICE {
 		pty_dynamic(pty_none),
 		sls_app_type(sls_app_type_none),
 		asu_flags(asu_flags_none),
+		ecc(ecc_none),
 		pri_comp_subchid(AUDIO_SERVICE::subchid_none),
 		multi_comps(false)
 	{}
