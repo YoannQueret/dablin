@@ -16,6 +16,8 @@ list(APPEND dablin_sources
     tools.cpp
     version.cpp
     wav_output.cpp
+    fft.cpp
+    audio_spectrum_analyzer.cpp
     )
 
 set(dablin_cli_sources
@@ -31,6 +33,7 @@ set(dablin_gtk_sources
     dablin_gtk_cu_bar.cpp
     dablin_gtk_logs.cpp
     dablin_gtk_level_meter.cpp
+    dablin_gtk_spectrum.cpp
     ecc_countries.cpp
     edi_network_source.cpp
     edi_pft.cpp

@@ -18,6 +18,8 @@
 
 #include "dablin_gtk_sls.h"
 
+#include <fstream>
+
 
 
 // --- DABlinGTKSlideshowContent -----------------------------------------------------------------
@@ -31,8 +33,23 @@ DABlinGTKSlideshowContent::DABlinGTKSlideshowContent() {
 	image.set_margin_end(5);
 	image.set_margin_bottom(5);
 
-	attach(image, 0, 0, 1, 1);
-	attach_next_to(link_button, image, Gtk::POS_BOTTOM, 1, 1);
+	// GtkImage has no window of its own, so wrap it to reliably receive the right-click
+	image_event_box.add(image);
+	image_event_box.add_events(Gdk::BUTTON_PRESS_MASK);
+	image_event_box.signal_button_press_event().connect(sigc::mem_fun(*this, &DABlinGTKSlideshowContent::on_image_button_press_event));
+
+	save_slide_menu_item.set_label("Save slide as...");
+	save_slide_menu_item.signal_activate().connect(sigc::mem_fun(*this, &DABlinGTKSlideshowContent::on_save_slide_clicked));
+	slide_context_menu.append(save_slide_menu_item);
+
+	copy_slide_menu_item.set_label("Copy");
+	copy_slide_menu_item.signal_activate().connect(sigc::mem_fun(*this, &DABlinGTKSlideshowContent::on_copy_slide_clicked));
+	slide_context_menu.append(copy_slide_menu_item);
+
+	slide_context_menu.show_all();
+
+	attach(image_event_box, 0, 0, 1, 1);
+	attach_next_to(link_button, image_event_box, Gtk::POS_BOTTOM, 1, 1);
 	attach_next_to(progress_file, link_button, Gtk::POS_BOTTOM, 1, 1);
 }
 
@@ -66,6 +83,9 @@ void DABlinGTKSlideshowContent::UpdateSlide(const MOT_FILE& slide) {
 	Glib::RefPtr<Gdk::Pixbuf> pixbuf = pixbuf_loader->get_pixbuf();
 	if(!pixbuf)
 		return;
+
+	// keep the raw, still encoded bytes around, so a right-click can offer saving the exact original file
+	current_slide = slide;
 
 	// update image
 	image.set(pixbuf);
@@ -103,4 +123,57 @@ void DABlinGTKSlideshowContent::UpdateFileProgress(const double fraction) {
 	else
 		progress_file.set_fraction(fraction);
 	progress_file.show();
+}
+
+bool DABlinGTKSlideshowContent::on_image_button_press_event(GdkEventButton* button_event) {
+	if(button_event->type != GDK_BUTTON_PRESS || button_event->button != 3)
+		return false;
+	if(current_slide.data.empty())
+		return false;
+
+	slide_context_menu.popup_at_pointer((GdkEvent*) button_event);
+	return true;
+}
+
+void DABlinGTKSlideshowContent::on_save_slide_clicked() {
+	if(current_slide.data.empty())
+		return;
+
+	std::string extension;
+	switch(current_slide.content_sub_type) {
+	case MOT_FILE::CONTENT_SUB_TYPE_JFIF:
+		extension = ".jpg";
+		break;
+	case MOT_FILE::CONTENT_SUB_TYPE_PNG:
+		extension = ".png";
+		break;
+	default:
+		extension = "";
+		break;
+	}
+
+	std::string suggested_name = !current_slide.content_name.empty() ? current_slide.content_name : "slide" + extension;
+
+	Gtk::Window* parent = (Gtk::Window*) get_toplevel();
+	Gtk::FileChooserDialog dialog(*parent, "Save slide as...", Gtk::FILE_CHOOSER_ACTION_SAVE);
+	dialog.set_do_overwrite_confirmation(true);
+	dialog.set_current_name(suggested_name);
+	dialog.add_button("_Cancel", Gtk::RESPONSE_CANCEL);
+	dialog.add_button("_Save", Gtk::RESPONSE_OK);
+
+	if(dialog.run() != Gtk::RESPONSE_OK)
+		return;
+
+	std::string filename = dialog.get_filename();
+
+	std::ofstream file(filename, std::ios::binary);
+	file.write((const char*) current_slide.data.data(), current_slide.data.size());
+}
+
+void DABlinGTKSlideshowContent::on_copy_slide_clicked() {
+	Glib::RefPtr<Gdk::Pixbuf> pixbuf = image.get_pixbuf();
+	if(!pixbuf)
+		return;
+
+	Gtk::Clipboard::get()->set_image(pixbuf);
 }

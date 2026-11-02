@@ -38,7 +38,7 @@ DABlinGTKLevelMeter::DABlinGTKLevelMeter() {
 	// in mono, the single bar simply spans the full area the two stereo bars would occupy
 	set_size_request(SCALE_WIDTH + BARS_AREA_WIDTH + 4, -1);
 	set_vexpand(true);
-	set_tooltip_text("Audio level (dBFS) of the currently playing service");
+	set_tooltip_text("Audio level (dBFS)");
 	SetChannels(1);
 }
 

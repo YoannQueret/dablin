@@ -38,6 +38,7 @@
 #include "dablin_gtk_cu_bar.h"
 #include "dablin_gtk_logs.h"
 #include "dablin_gtk_level_meter.h"
+#include "dablin_gtk_spectrum.h"
 #include "eti_source.h"
 #include "edi_source.h"
 #include "edi_player.h"
@@ -223,6 +224,10 @@ private:
 	void EnsembleAudioLevel(const std::vector<double>& channel_dbfs) {ensemble_audio_level.PushAndEmit(channel_dbfs);}
 	void EnsembleAudioLevelEmitted();
 
+	GTKDispatcherQueue<AUDIO_SPECTRUM> ensemble_audio_spectrum;
+	void EnsembleAudioSpectrum(const AUDIO_SPECTRUM& spectrum) {ensemble_audio_spectrum.PushAndEmit(spectrum);}
+	void EnsembleAudioSpectrumEmitted();
+
 	void EnsembleProcessFIC(const uint8_t *data, size_t len) {fic_decoder->Process(data, len);}
 	void EnsembleResetFIC() {fic_decoder->Reset();}
 	void EnsembleProcessPAD(const uint8_t *xpad_data, size_t xpad_len, bool exact_xpad_len, const uint8_t* fpad_data) {pad_decoder->Process(xpad_data, xpad_len, exact_xpad_len, fpad_data);}
@@ -294,6 +299,8 @@ private:
 	Gtk::Box dl_plus_slideshow_box;
 	Gtk::Frame frame_dl_plus;
 	DABlinGTKDLPlusContent dl_plus_content;
+	Gtk::Frame frame_spectrum;
+	DABlinGTKSpectrum spectrum;
 	Gtk::Frame frame_level_meter;
 	DABlinGTKLevelMeter level_meter;
 	Gtk::Frame frame_slideshow;

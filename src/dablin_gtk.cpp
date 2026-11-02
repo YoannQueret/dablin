@@ -379,6 +379,7 @@ DABlinGTK::DABlinGTK(DABlinGTKOptions options) : combo_network_uri(true) {
 	ensemble_update_progress.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::EnsembleUpdateProgressEmitted));
 	ensemble_change_format.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::EnsembleChangeFormatEmitted));
 	ensemble_audio_level.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::EnsembleAudioLevelEmitted));
+	ensemble_audio_spectrum.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::EnsembleAudioSpectrumEmitted));
 	fic_change_ensemble.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeEnsembleEmitted));
 	fic_change_service.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeServiceEmitted));
 	fic_remove_service.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICRemoveServiceEmitted));
@@ -744,11 +745,10 @@ void DABlinGTK::InitWidgets() {
 	tglbtn_network_connect.set_label("Connect");
 	tglbtn_network_connect.signal_toggled().connect(sigc::mem_fun(*this, &DABlinGTK::on_tglbtn_network_connect));
 
-	// pick the initial source type - DAB when available (matching the pre-existing
-	// default), otherwise Network, which never depends on external hardware
-	tglbtn_source_dab.set_active(dab_available);
-	tglbtn_source_network.set_active(!dab_available);
-	source_stack.set_visible_child(dab_available ? "dab" : "network");
+	// Network is the default source, regardless of whether a DAB live source is available
+	tglbtn_source_dab.set_active(false);
+	tglbtn_source_network.set_active(true);
+	source_stack.set_visible_child("network");
 
 	frame_label_ensemble.set_label("Ensemble");
 	frame_label_ensemble.add(label_ensemble);
@@ -843,10 +843,14 @@ void DABlinGTK::InitWidgets() {
 	label_dl.set_halign(Gtk::ALIGN_START);
 	label_dl.set_valign(Gtk::ALIGN_START);
 	label_dl.set_padding(WIDGET_SPACE, WIDGET_SPACE);
+	label_dl.set_selectable(true);	// enables text selection + the native right-click "Copy" menu
 
 	frame_dl_plus.set_label("Dynamic Label Plus");
 	frame_dl_plus.set_hexpand(true);
 	frame_dl_plus.add(dl_plus_content);
+
+	frame_spectrum.set_label("Spectrum");
+	frame_spectrum.add(spectrum);
 
 	frame_level_meter.set_label("Level");
 	frame_level_meter.add(level_meter);
@@ -857,6 +861,7 @@ void DABlinGTK::InitWidgets() {
 	dl_plus_slideshow_box.set_orientation(Gtk::ORIENTATION_HORIZONTAL);
 	dl_plus_slideshow_box.set_spacing(WIDGET_SPACE);
 	dl_plus_slideshow_box.pack_start(frame_dl_plus, true, true);
+	dl_plus_slideshow_box.pack_start(frame_spectrum, false, false);
 	dl_plus_slideshow_box.pack_start(frame_level_meter, false, false);
 	dl_plus_slideshow_box.pack_start(frame_slideshow, false, false);
 
@@ -916,7 +921,7 @@ void DABlinGTK::InitWidgets() {
 
 	show_all_children();
 	progress_position.hide();	// invisible until progress updated
-	source_stack.set_visible_child(dab_available ? "dab" : "network");	// show_all_children() re-shows both pages
+	source_stack.set_visible_child("network");	// show_all_children() re-shows both pages
 }
 
 void DABlinGTK::AddChannels() {
@@ -996,6 +1001,7 @@ void DABlinGTK::SetService(const LISTED_SERVICE& service) {
 
 		dl_plus_content.ClearDLPlusInfo();
 		level_meter.Reset();
+		spectrum.Reset();
 
 		if(!service.HasSLS())
 			slideshow_content.ClearSlide();
@@ -1497,6 +1503,10 @@ void DABlinGTK::EnsembleChangeFormatEmitted() {
 
 void DABlinGTK::EnsembleAudioLevelEmitted() {
 	level_meter.SetLevels(ensemble_audio_level.Pop());
+}
+
+void DABlinGTK::EnsembleAudioSpectrumEmitted() {
+	spectrum.SetSpectrum(ensemble_audio_spectrum.Pop());
 }
 
 void DABlinGTK::FICChangeEnsemble(const FIC_ENSEMBLE& ensemble) {

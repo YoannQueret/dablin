@@ -37,10 +37,21 @@
 #include "pcm_output.h"
 #include "wav_output.h"
 #include "tools.h"
+#include "audio_spectrum_analyzer.h"
 
 
 // --- AudioOutputType -----------------------------------------------------------------
 enum class AudioOutputType { SDL, PCM, WAV, Untouched };
+
+
+// --- AUDIO_SPECTRUM -----------------------------------------------------------------
+struct AUDIO_SPECTRUM {
+	int samplerate = 0;
+	// one magnitude (dBFS) vector per channel, in the order the stream carries them; each has
+	// AudioSpectrumAnalyzer::num_bands logarithmically spaced bands, from
+	// AudioSpectrumAnalyzer::min_freq to AudioSpectrumAnalyzer::max_freq
+	std::vector<std::vector<double>> channels_db;
+};
 
 
 // --- EnsemblePlayerObserver -----------------------------------------------------------------
@@ -53,6 +64,7 @@ public:
 	virtual void EnsembleProcessPAD(const uint8_t* /*xpad_data*/, size_t /*xpad_len*/, bool /*exact_xpad_len*/, const uint8_t* /*fpad_data*/) {}
 	// one entry per audio channel (1 = mono, 2 = stereo), in the order the stream carries them
 	virtual void EnsembleAudioLevel(const std::vector<double>& /*channel_dbfs*/) {}
+	virtual void EnsembleAudioSpectrum(const AUDIO_SPECTRUM& /*spectrum*/) {}
 };
 
 
@@ -71,11 +83,13 @@ protected:
 	SubchannelSink *dec;
 	AudioOutput *out;
 	int audio_channels;
+	int audio_samplerate;
+	AudioSpectrumAnalyzer spectrum_analyzer;
 
 	virtual void DecodeFrame(const uint8_t *ensemble_frame) = 0;
 
 	void FormatChange(const AUDIO_SERVICE_FORMAT& format);
-	void StartAudio(int samplerate, int channels) {audio_channels = channels; if(out) out->StartAudio(samplerate, channels);}
+	void StartAudio(int samplerate, int channels);
 	void PutAudio(const uint8_t *data, size_t len);
 
 	void ProcessFIC(const uint8_t *data, size_t len);

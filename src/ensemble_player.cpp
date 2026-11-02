@@ -32,6 +32,7 @@ EnsemblePlayer::EnsemblePlayer(AudioOutputType audio_output_type, bool disable_i
 	dec = nullptr;
 	out = nullptr;
 	audio_channels = 1;
+	audio_samplerate = 0;
 
 	switch(audio_output_type) {
 #ifndef DABLIN_DISABLE_SDL
@@ -114,6 +115,14 @@ void EnsemblePlayer::ProcessFrame(const uint8_t *data) {
 	DecodeFrame(data);
 }
 
+void EnsemblePlayer::StartAudio(int samplerate, int channels) {
+	audio_channels = channels;
+	audio_samplerate = samplerate;
+	spectrum_analyzer.Reset();
+	if(out)
+		out->StartAudio(samplerate, channels);
+}
+
 void EnsemblePlayer::PutAudio(const uint8_t *data, size_t len) {
 	if(out)
 		out->PutAudio(data, len);
@@ -140,6 +149,15 @@ void EnsemblePlayer::PutAudio(const uint8_t *data, size_t len) {
 			levels_dbfs[ch] = std::max(dbfs, silence_dbfs);
 		}
 		observer->EnsembleAudioLevel(levels_dbfs);
+
+		// derive the magnitude spectrum per channel too, for the spectrum analyzer widget; only
+		// emitted once the analyzer's sliding window has seen enough samples to produce a result
+		AUDIO_SPECTRUM spectrum;
+		spectrum.channels_db = spectrum_analyzer.Process(samples, num_samples, channels, audio_samplerate);
+		if(!spectrum.channels_db.empty() && !spectrum.channels_db[0].empty()) {
+			spectrum.samplerate = audio_samplerate;
+			observer->EnsembleAudioSpectrum(spectrum);
+		}
 	}
 }
 
