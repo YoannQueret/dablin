@@ -18,6 +18,7 @@
 #ifndef DABLIN_GTK_CU_BAR_H_
 #define DABLIN_GTK_CU_BAR_H_
 
+#include <map>
 #include <vector>
 
 #include <gtkmm.h>
@@ -26,28 +27,39 @@
 
 
 // --- DABlinGTKCUBar -----------------------------------------------------------------
-// full width bar showing the CIF's 864 Capacity Units, with one block per occupied sub-channel
+// full width bar showing the CIF's 864 Capacity Units, with one block per occupied sub-channel -
+// including sub-channels with no (audio) service dablin can play (e.g. data/EPG services),
+// so the bar's background accurately reflects which CUs are actually free
 class DABlinGTKCUBar : public Gtk::DrawingArea {
 private:
 	struct Entry {
 		int subchid;
-		uint16_t sid;
+		int sid;	// 16-bit (programme) or 32-bit (data) SId
+		bool has_sid;	// sid is only meaningful if true (always true when is_audio)
 		int scids;
 		size_t start;
 		size_t size;
+		bool is_audio;
 	};
+
+	std::vector<LISTED_SERVICE> services;
+	std::map<int, FIC_SUBCHANNEL> subchannels;
 
 	std::vector<Entry> entries;
 	int selected_subchid;
 
+	void RebuildEntries();
+	const Entry* GetEntryAt(double x) const;
 	bool on_draw(const Cairo::RefPtr<Cairo::Context>& cr) override;
 	bool on_button_press_event(GdkEventButton* event) override;
+	bool on_query_tooltip(int x, int y, bool keyboard_tooltip, const Glib::RefPtr<Gtk::Tooltip>& tooltip);
 public:
 	static const size_t total_cus = 864;
 
 	DABlinGTKCUBar();
 
 	void SetServices(const std::vector<LISTED_SERVICE>& services);
+	void SetSubchannels(const std::map<int, FIC_SUBCHANNEL>& subchannels);
 	void SetSelectedSubchId(int subchid);
 
 	// emitted with (sid, scids) when the user clicks a service's block

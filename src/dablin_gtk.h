@@ -182,6 +182,8 @@ private:
 	std::thread ensemble_source_thread;
 
 	EnsemblePlayer *ensemble_player;
+	AudioOutputType audio_output_type;
+	void EnsureEnsemblePlayer(const std::string& format);
 
 	FICDecoder *fic_decoder;
 	PADDecoder *pad_decoder;
@@ -231,13 +233,26 @@ private:
 	Gtk::Grid top_grid;
 	Gtk::Grid header_grid;
 
-	Gtk::Frame frame_combo_channels;
+	Gtk::Frame frame_source;
+	Gtk::Box source_box;
+	Gtk::RadioButton tglbtn_source_dab;
+	Gtk::RadioButton tglbtn_source_network;
+	Gtk::Stack source_stack;
+	void on_source_type_changed(bool dab);
+
 	Gtk::Box channels_box;
 	DABlinGTKChannelColumns combo_channels_cols;
 	Glib::RefPtr<Gtk::ListStore> combo_channels_liststore;
 	Gtk::ComboBox combo_channels;
 	int ComboChannelsSlotCompare(const Gtk::TreeModel::iterator& a, const Gtk::TreeModel::iterator& b);
 	Gtk::Button btn_channels_stop;
+
+	Gtk::Box network_box;
+	Gtk::ComboBoxText combo_network_uri;
+	Gtk::ToggleButton tglbtn_network_connect;
+	void on_tglbtn_network_connect();
+	void ShowNetworkConnectError(const std::string& message);
+	void AddToNetworkHistory(const std::string& uri);
 
 	FIC_ENSEMBLE ensemble;
 	Gtk::Frame frame_label_ensemble;
@@ -253,9 +268,12 @@ private:
 	DABlinGTKServiceDetailsColumns services_table_cols;
 	Glib::RefPtr<Gtk::ListStore> services_table_liststore;
 	DABlinGTKCUBar cu_bar;
+	std::map<int, FIC_SUBCHANNEL> known_subchannels;	// every sub-channel in the ensemble, audio or data - for accurate CU bar occupancy
+	std::map<int, uint32_t> known_data_service_sids;	// SubChId -> SId, for data sub-channels whose service identity is known
 	int ServicesTableSlotCompare(const Gtk::TreeModel::iterator& a, const Gtk::TreeModel::iterator& b);
 	void RenderServiceDetailCell(Gtk::CellRenderer* renderer, const Gtk::TreeModel::iterator& it, int column_id);
 	Gtk::ListStore::iterator UpdateServicesTableRow(const LISTED_SERVICE& service, bool* was_new = nullptr);
+	void RebuildDataSubchannelRows();
 	int GetSelectedServiceIndex();
 	void TrySwitchService(int index);
 	void UpdateCUBar();
@@ -297,6 +315,7 @@ private:
 	void SetService(const LISTED_SERVICE& service);
 	void UpdateAnnouncementSupport(const LISTED_SERVICE& service);
 	void ShowDateTime(bool scheduled);
+	void StopEnsembleSource();
 
 	void on_btn_channels_stop();
 	void on_tglbtn_record();
@@ -338,6 +357,22 @@ private:
 	GTKDispatcherQueue<fic_service_id_t> fic_remove_service;
 	void FICRemoveService(const fic_service_id_t& service_id) {fic_remove_service.PushAndEmit(service_id);}
 	void FICRemoveServiceEmitted();
+
+	GTKDispatcherQueue<std::pair<int,FIC_SUBCHANNEL>> fic_change_subchannel;
+	void FICChangeSubchannel(int subchid, const FIC_SUBCHANNEL& subchannel) {fic_change_subchannel.PushAndEmit(std::make_pair(subchid, subchannel));}
+	void FICChangeSubchannelEmitted();
+
+	GTKDispatcherQueue<int> fic_remove_subchannel;
+	void FICRemoveSubchannel(int subchid) {fic_remove_subchannel.PushAndEmit(subchid);}
+	void FICRemoveSubchannelEmitted();
+
+	GTKDispatcherQueue<std::pair<int,uint32_t>> fic_change_data_service_sid;
+	void FICChangeDataServiceSID(int subchid, uint32_t sid) {fic_change_data_service_sid.PushAndEmit(std::make_pair(subchid, sid));}
+	void FICChangeDataServiceSIDEmitted();
+
+	GTKDispatcherQueue<int> fic_remove_data_service_sid;
+	void FICRemoveDataServiceSID(int subchid) {fic_remove_data_service_sid.PushAndEmit(subchid);}
+	void FICRemoveDataServiceSIDEmitted();
 
 	void FICChangeUTCDateTime(const FIC_DAB_DT& utc_dt);
 

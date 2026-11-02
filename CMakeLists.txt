@@ -159,6 +159,24 @@ if(NOT NATIVE_ATOMICS_SUPPORT)
 endif()
 
 ########################################################################
+# Bundled DAB live source (vendored eti-cmdline, RTL-SDR only - see
+# contrib/eti-cmdline/NOTICE.md). Built alongside dablin_gtk so live SDR
+# reception works without a separately installed eti-cmdline/dab2eti binary.
+########################################################################
+
+option(DABLIN_BUNDLE_ETI_CMDLINE "Build the vendored eti-cmdline (RTL-SDR live source)" ON)
+
+if(DABLIN_BUNDLE_ETI_CMDLINE)
+    pkg_check_modules(LIBRTLSDR librtlsdr)
+    if(LIBRTLSDR_FOUND)
+        set(DABLIN_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/src)
+        add_subdirectory(contrib/eti-cmdline)
+    else()
+        message(STATUS "librtlsdr not found, skipping bundled eti-cmdline (live SDR reception won't be available)")
+    endif()
+endif()
+
+########################################################################
 # Setup DABlin application build
 ########################################################################
 

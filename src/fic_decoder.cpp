@@ -30,6 +30,9 @@ void FICDecoder::Reset() {
 	ensemble = FIC_ENSEMBLE();
 	services.clear();
 	subchannels.clear();
+	data_service_sids.clear();
+	packet_data_service_sids.clear();
+	packet_data_subchids.clear();
 	utc_dt = FIC_DAB_DT();
 }
 
@@ -86,10 +89,18 @@ void FICDecoder::ProcessFIG0(const uint8_t *data, size_t len) {
 	data++;
 	len--;
 
-	// ignore next config/other ensembles/data services
-	if(header.cn || header.oe || header.pd)
+	// ignore next config/other ensembles
+	if(header.cn || header.oe)
 		return;
 
+	if(header.pd) {
+		// data mode (P/D=1): only FIG 0/2 is understood here, to resolve the SId of a plain
+		// data service (e.g. a locally-configured EPG sub-channel) - everything else keeps
+		// being ignored, as its data-mode variant (if any) isn't verified/implemented
+		if(header.extension == 2)
+			ProcessFIG0_2_Data(data, len);
+		return;
+	}
 
 	// handle extension
 	switch(header.extension) {
@@ -101,6 +112,9 @@ void FICDecoder::ProcessFIG0(const uint8_t *data, size_t len) {
 		break;
 	case 2:
 		ProcessFIG0_2(data, len);
+		break;
+	case 3:
+		ProcessFIG0_3(data, len);
 		break;
 	case 5:
 		ProcessFIG0_5(data, len);
@@ -201,15 +215,23 @@ void FICDecoder::ProcessFIG0_1(const uint8_t *data, size_t len) {
 		if(!sc.IsNone()) {
 			FIC_SUBCHANNEL& current_sc = GetSubchannel(subchid);
 			sc.language = current_sc.language;	// ignored for comparison
-			if(current_sc != sc) {
+			bool changed = current_sc != sc;
+			if(changed) {
 				current_sc = sc;
 
 				fprintf(stderr, "FICDecoder: SubChId %2d: start %3zu CUs, size %3zu CUs, PL %-7s = %3d kBit/s\n", subchid, sc.start, sc.size, sc.pl.c_str(), sc.bitrate);
 				Log("SubChId " + std::to_string(subchid) + ": start " + std::to_string(sc.start) + " CUs, size " + std::to_string(sc.size) +
 						" CUs, PL " + sc.pl + " = " + std::to_string(sc.bitrate) + " kBit/s");
-
-				UpdateSubchannel(subchid);
 			}
+
+			// FIG 0/1 lists the complete, currently valid sub-channel table on every cycle
+			// (ETSI EN 300 401 clause 6.3), so its (re)appearance is the liveness signal
+			// used to detect a sub-channel being hot-removed - same pattern as FIG 0/2 for services
+			current_sc.seen_in_fig0_1 = true;
+			current_sc.last_seen_fig0_1 = std::chrono::steady_clock::now();
+
+			if(changed)
+				UpdateSubchannel(subchid);
 		}
 	}
 }
@@ -270,6 +292,82 @@ void FICDecoder::ProcessFIG0_2(const uint8_t *data, size_t len) {
 			}
 
 			offset += 2;
+		}
+	}
+}
+
+void FICDecoder::SetDataServiceSid(int subchid, uint32_t sid) {
+	uint32_t& current_sid = data_service_sids[subchid];
+	if(current_sid == sid)
+		return;
+	current_sid = sid;
+
+	fprintf(stderr, "FICDecoder: SubChId %2d: data service SId 0x%08X\n", subchid, sid);
+	Log("SubChId " + std::to_string(subchid) + ": data service SId " + StringTools::IntToHex((int) sid, sid > 0xFFFF ? 8 : 4));
+
+	observer->FICChangeDataServiceSID(subchid, sid);
+}
+
+void FICDecoder::ResolvePacketDataService(int scid) {
+	// only once both halves are known: the SId (from FIG 0/2, data mode) and the SubChId
+	// (from FIG 0/3) that this SCId's packet component actually maps to
+	std::map<int,uint32_t>::const_iterator sid_it = packet_data_service_sids.find(scid);
+	std::map<int,int>::const_iterator subchid_it = packet_data_subchids.find(scid);
+	if(sid_it != packet_data_service_sids.end() && subchid_it != packet_data_subchids.end())
+		SetDataServiceSid(subchid_it->second, sid_it->second);
+}
+
+void FICDecoder::ProcessFIG0_2_Data(const uint8_t *data, size_t len) {
+	// FIG 0/2 (data mode, P/D=1) - plain data service (e.g. EPG) + component definition.
+	// Mirrors ProcessFIG0_2's structure, but with the data-mode service header (32-bit SId).
+	// "MSC stream data" (TMid=1) primary components give the SubChId directly; "MSC packet
+	// data" (TMid=3) ones only give an SCId, resolved to a SubChId via FIG 0/3 instead.
+
+	// iterate through all data services
+	for(size_t offset = 0; offset < len;) {
+		uint32_t sid32 = (uint32_t) data[offset] << 24 | (uint32_t) data[offset + 1] << 16 |
+				(uint32_t) data[offset + 2] << 8 | data[offset + 3];
+		offset += 4;
+
+		size_t num_service_comps = data[offset++] & 0x0F;
+
+		// iterate through all service components
+		for(size_t comp = 0; comp < num_service_comps; comp++) {
+			int tmid = data[offset] >> 6;
+			bool ps = data[offset + 1] & 0x02;
+
+			if(ps) {	// only the primary component identifies the service's own sub-channel
+				if(tmid == 0b01) {	// MSC stream data
+					int subchid = data[offset + 1] >> 2;
+					SetDataServiceSid(subchid, sid32);
+				} else if(tmid == 0b11) {	// MSC packet data
+					int scid = (data[offset] & 0x3F) << 6 | (data[offset + 1] >> 2);
+					packet_data_service_sids[scid] = sid32;
+					ResolvePacketDataService(scid);
+				}
+			}
+
+			offset += 2;
+		}
+	}
+}
+
+void FICDecoder::ProcessFIG0_3(const uint8_t *data, size_t len) {
+	// FIG 0/3 - Service component definition in packet mode: SCId -> SubChId (+ packet
+	// address, not used here). Needed to resolve the sub-channel of a "MSC packet data"
+	// (TMid=3) data service component found in FIG 0/2 (data mode).
+
+	for(size_t offset = 0; offset + 5 <= len;) {
+		int scid = data[offset] << 4 | (data[offset + 1] >> 4);
+		bool scca_flag = data[offset + 1] & 0x01;
+		int subchid = data[offset + 3] >> 2;
+		offset += 5;
+		if(scca_flag)
+			offset += 2;	// SCCA field, not used
+
+		if(packet_data_subchids[scid] != subchid) {
+			packet_data_subchids[scid] = subchid;
+			ResolvePacketDataService(scid);
 		}
 	}
 }
@@ -762,6 +860,8 @@ FIC_SUBCHANNEL& FICDecoder::GetSubchannel(int subchid) {
 }
 
 void FICDecoder::UpdateSubchannel(int subchid) {
+	observer->FICChangeSubchannel(subchid, subchannels.at(subchid));
+
 	// update services that consist of this sub-channel
 	for(const fic_services_t::value_type& service : services) {
 		const FIC_SERVICE& s = service.second;
@@ -821,6 +921,8 @@ void FICDecoder::UpdateListedService(const FIC_SERVICE& service, int scids, bool
 		if(cl_it != service.comp_labels.end())
 			ls.label = cl_it->second;
 	}
+	ls.is_audio = true;
+	ls.subchid = ls.audio_service.subchid;
 
 	// use sub-channel information, if available
 	fic_subchannels_t::const_iterator sc_it = subchannels.find(ls.audio_service.subchid);
@@ -870,7 +972,7 @@ void FICDecoder::CheckServiceTimeouts() {
 		}
 	}
 
-	PruneOrphanedSubchannels();
+	PruneStaleSubchannels();
 }
 
 void FICDecoder::RemoveService(const FIC_SERVICE& service) {
@@ -885,19 +987,23 @@ void FICDecoder::RemoveService(const FIC_SERVICE& service) {
 	}
 }
 
-void FICDecoder::PruneOrphanedSubchannels() {
-	// drop sub-channel info no longer referenced by any remaining service, so a later
-	// reuse of the same SubChId starts from a clean state
-	std::set<int> used_subchids;
-	for(const fic_services_t::value_type& service : services)
-		for(const audio_comps_t::value_type& audio_comp : service.second.audio_comps)
-			used_subchids.insert(audio_comp.first);
+void FICDecoder::PruneStaleSubchannels() {
+	// a sub-channel still present in the ensemble is re-announced in every FIG 0/1 cycle,
+	// same liveness pattern as service hot-removal via FIG 0/2 (CheckServiceTimeouts) -
+	// this also correctly keeps data-only sub-channels (e.g. EPG) that never belong to
+	// any listed audio service, instead of dropping them as soon as they're seen
+	auto now = std::chrono::steady_clock::now();
 
 	for(fic_subchannels_t::iterator it = subchannels.begin(); it != subchannels.end();) {
-		if(used_subchids.find(it->first) == used_subchids.end())
+		const FIC_SUBCHANNEL& sc = it->second;
+		if(sc.seen_in_fig0_1 && now - sc.last_seen_fig0_1 > service_timeout) {
+			observer->FICRemoveSubchannel(it->first);
+			if(data_service_sids.erase(it->first))
+				observer->FICRemoveDataServiceSID(it->first);
 			it = subchannels.erase(it);
-		else
+		} else {
 			++it;
+		}
 	}
 }
 

@@ -19,13 +19,121 @@
 #include "dablin_gtk.h"
 
 #include "ecc_countries.h"
+#include "edi_network_source.h"
+
+#include <algorithm>
+#include <fstream>
+#include <sys/stat.h>
 
 static DABlinGTK *dablin = nullptr;
+
+// --- network connect history (persisted to $XDG_CONFIG_HOME/dablin/network_history, or
+// ~/.config/dablin/network_history) -----------------------------------------------------------
+static const size_t NETWORK_HISTORY_MAX_ENTRIES = 10;
+
+static std::string GetConfigDir() {
+	const char *xdg_config_home = getenv("XDG_CONFIG_HOME");
+	std::string base = (xdg_config_home && *xdg_config_home) ? xdg_config_home :
+			std::string(getenv("HOME") ? getenv("HOME") : ".") + "/.config";
+	return base + "/dablin";
+}
+
+static std::string GetNetworkHistoryPath() {
+	return GetConfigDir() + "/network_history";
+}
+
+static std::vector<std::string> LoadNetworkHistory() {
+	std::vector<std::string> result;
+	std::ifstream file(GetNetworkHistoryPath());
+	std::string line;
+	while(std::getline(file, line) && result.size() < NETWORK_HISTORY_MAX_ENTRIES)
+		if(!line.empty())
+			result.push_back(line);
+	return result;
+}
+
+static void SaveNetworkHistory(const std::vector<std::string>& history) {
+	std::string config_dir = GetConfigDir();
+
+	// best-effort directory creation (also covers a missing ~/.config); errors (incl. EEXIST) are ignored
+	size_t pos = config_dir.find_last_of('/');
+	if(pos != std::string::npos)
+		mkdir(config_dir.substr(0, pos).c_str(), 0755);
+	mkdir(config_dir.c_str(), 0755);
+
+	std::ofstream file(GetNetworkHistoryPath());
+	for(const std::string& uri : history)
+		file << uri << "\n";
+}
 
 static void break_handler(int) {
 	fprintf(stderr, "...DABlin exits...\n");
 	if(dablin)
 		dablin->hide();
+}
+
+
+// --- DAB live source auto-detection (so SDR reception works out of the box, without
+// having to pass -d/-D on the command line) -----------------------------------------------------
+static bool FindInPath(const std::string& name, std::string& out_path) {
+	const char *path_env = getenv("PATH");
+	if(!path_env)
+		return false;
+
+	std::string path(path_env);
+	size_t start = 0;
+	while(start <= path.size()) {
+		size_t end = path.find(':', start);
+		if(end == std::string::npos)
+			end = path.size();
+
+		std::string dir = path.substr(start, end - start);
+		if(!dir.empty()) {
+			std::string candidate = dir + "/" + name;
+			if(access(candidate.c_str(), X_OK) == 0) {
+				out_path = candidate;
+				return true;
+			}
+		}
+		start = end + 1;
+	}
+	return false;
+}
+
+static std::string GetExecutableDir() {
+	char buf[4096];
+	ssize_t len = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+	if(len <= 0)
+		return "";
+	buf[len] = '\0';
+
+	std::string path(buf);
+	size_t pos = path.find_last_of('/');
+	return pos == std::string::npos ? "" : path.substr(0, pos);
+}
+
+// tries the known DAB live source tools, in order of preference
+static bool DetectLiveSourceBinary(std::string& binary, std::string& type) {
+	// prefer dablin's own bundled eti-cmdline (built alongside this executable), if present
+	std::string exe_dir = GetExecutableDir();
+	if(!exe_dir.empty()) {
+		std::string candidate = exe_dir + "/eti-cmdline-rtlsdr";
+		if(access(candidate.c_str(), X_OK) == 0) {
+			binary = candidate;
+			type = DABLiveETISource::TYPE_ETI_CMDLINE;
+			return true;
+		}
+	}
+
+	if(FindInPath("eti-cmdline", binary)) {
+		type = DABLiveETISource::TYPE_ETI_CMDLINE;
+		return true;
+	}
+	if(FindInPath("dab2eti", binary)) {
+		type = DABLiveETISource::TYPE_DAB2ETI;
+		return true;
+	}
+	return false;
 }
 
 
@@ -168,6 +276,17 @@ int main(int argc, char **argv) {
 		usage(argv[0]);
 	}
 
+	// auto-detect a DAB live source (RTL-SDR via eti-cmdline/dab2eti) when nothing else
+	// was explicitly requested, so channel selection works out of the box without -d/-D
+	if(options.dab_live_source_binary.empty() && options.filename.empty() && options.source_format == EnsembleSource::FORMAT_ETI) {
+		std::string detected_binary, detected_type;
+		if(DetectLiveSourceBinary(detected_binary, detected_type)) {
+			fprintf(stderr, "DABlinGTK: auto-detected DAB live source '%s'\n", detected_binary.c_str());
+			options.dab_live_source_binary = detected_binary;
+			options.dab_live_source_type = detected_type;
+		}
+	}
+
 	// ensure valid options
 	if(options.dab_live_source_binary.empty()) {
 		if(!options.displayed_channels.empty()) {
@@ -239,7 +358,7 @@ int main(int argc, char **argv) {
 
 
 // --- DABlinGTK -----------------------------------------------------------------
-DABlinGTK::DABlinGTK(DABlinGTKOptions options) {
+DABlinGTK::DABlinGTK(DABlinGTKOptions options) : combo_network_uri(true) {
 	this->options = options;
 
 	switch_service_label = options.initial_label;
@@ -263,6 +382,10 @@ DABlinGTK::DABlinGTK(DABlinGTKOptions options) {
 	fic_change_ensemble.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeEnsembleEmitted));
 	fic_change_service.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeServiceEmitted));
 	fic_remove_service.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICRemoveServiceEmitted));
+	fic_change_subchannel.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeSubchannelEmitted));
+	fic_remove_subchannel.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICRemoveSubchannelEmitted));
+	fic_change_data_service_sid.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeDataServiceSIDEmitted));
+	fic_remove_data_service_sid.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICRemoveDataServiceSIDEmitted));
 	fic_log_message.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICLogMessageEmitted));
 	pad_change_dynamic_label.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::PADChangeDynamicLabelEmitted));
 	pad_change_slide.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::PADChangeSlideEmitted));
@@ -271,7 +394,7 @@ DABlinGTK::DABlinGTK(DABlinGTKOptions options) {
 	do_datetime_sync.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::DoDateTimeSyncEmitted));
 	do_datetime_update.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::DoDateTimeUpdateEmitted));
 
-	AudioOutputType audio_output_type = AudioOutputType::SDL;
+	audio_output_type = AudioOutputType::SDL;
 #ifndef DABLIN_DISABLE_SDL
 	if(options.pcm_output)
 #endif
@@ -363,16 +486,21 @@ void DABlinGTK::RenderServiceDetailCell(Gtk::CellRenderer* renderer, const Gtk::
 	std::string text;
 	switch(column_id) {
 	case 0:	// SubChId
-		text = std::to_string(service.audio_service.subchid);
+		text = std::to_string(service.subchid);
 		break;
-	case 1:	// SID (without the "0x" prefix, to save space in the table)
-		text = StringTools::IntToHex(service.sid, 4).substr(2);
+	case 1:	// SID (without the "0x" prefix, to save space in the table) - unknown for a plain data sub-channel
+		if(service.sid != LISTED_SERVICE::sid_none)
+			text = StringTools::SidToHex(service.sid);
 		break;
 	case 2:	// ECC (without the "0x" prefix), only shown if it differs from the ensemble's own (FIG 0/9 exception)
 		if(service.ecc != LISTED_SERVICE::ecc_none)
 			text = StringTools::IntToHex(service.ecc, 2).substr(2);
 		break;
 	case 3:	{ // Label
+		if(!service.is_audio) {
+			text = "(data service)";
+			break;
+		}
 		text = FICDecoder::ConvertLabelToUTF8(service.label, nullptr);
 		if(service.multi_comps)
 			text = (!service.IsPrimary() ? "» " : "") + text + (service.IsPrimary() ? " »" : "");
@@ -394,15 +522,15 @@ void DABlinGTK::RenderServiceDetailCell(Gtk::CellRenderer* renderer, const Gtk::
 			text = std::to_string(service.subchannel.bitrate) + " kBit/s";
 		break;
 	case 8:	// Format (only known for the currently playing sub-channel, while it is being decoded)
-		if(service.audio_service.subchid == current_audio_format_subchid)
+		if(service.is_audio && service.audio_service.subchid == current_audio_format_subchid)
 			text = current_audio_format.codec;
 		break;
 	case 9:	// Samplerate (ditto)
-		if(service.audio_service.subchid == current_audio_format_subchid && current_audio_format.samplerate_khz)
+		if(service.is_audio && service.audio_service.subchid == current_audio_format_subchid && current_audio_format.samplerate_khz)
 			text = std::to_string(current_audio_format.samplerate_khz) + " kHz";
 		break;
 	case 10:	// Audio mode (ditto)
-		if(service.audio_service.subchid == current_audio_format_subchid)
+		if(service.is_audio && service.audio_service.subchid == current_audio_format_subchid)
 			text = current_audio_format.mode;
 		break;
 	case 11:	// Language
@@ -419,6 +547,12 @@ void DABlinGTK::RenderServiceDetailCell(Gtk::CellRenderer* renderer, const Gtk::
 	}
 
 	text_renderer->property_text() = text;
+
+	// not a playable service - de-emphasize the whole row instead of just leaving cells blank
+	text_renderer->property_style() = service.is_audio ? Pango::STYLE_NORMAL : Pango::STYLE_ITALIC;
+	text_renderer->property_foreground_set() = !service.is_audio;
+	if(!service.is_audio)
+		text_renderer->property_foreground() = "grey";
 }
 
 bool DABlinGTK::on_services_table_query_tooltip(int x, int y, bool keyboard_tooltip, const Glib::RefPtr<Gtk::Tooltip>& tooltip) {
@@ -442,14 +576,19 @@ bool DABlinGTK::on_services_table_query_tooltip(int x, int y, bool keyboard_tool
 	const LISTED_SERVICE& service = (LISTED_SERVICE) (*it)[services_table_cols.col_service];
 
 	// row-wide details - more can be added here later
-	std::string text = "SID: " + StringTools::IntToHex(service.sid, 4).substr(2);
+	if(service.sid == LISTED_SERVICE::sid_none)
+		return false;
+	std::string text = "SID: " + StringTools::SidToHex(service.sid);
 
 	int ecc = service.ecc != LISTED_SERVICE::ecc_none ? service.ecc : ensemble.ecc;
 	if(ecc != FIC_ENSEMBLE::ecc_none) {
 		text += "\n" "ECC: " + StringTools::IntToHex(ecc, 2).substr(2);
-		const char *country = LookupECCCountry(ecc, service.sid >> 12);
-		if(country)
-			text += " (" + std::string(country) + ")";
+		// the ECC+country-nibble convention only applies to 16-bit (programme service) SIds
+		if(service.sid <= 0xFFFF) {
+			const char *country = LookupECCCountry(ecc, service.sid >> 12);
+			if(country)
+				text += " (" + std::string(country) + ")";
+		}
 	}
 
 	tooltip->set_text(text);
@@ -478,13 +617,88 @@ Gtk::ListStore::iterator DABlinGTK::UpdateServicesTableRow(const LISTED_SERVICE&
 	return row_it;
 }
 
+void DABlinGTK::RebuildDataSubchannelRows() {
+	// sub-channels already represented by a playable (audio) row
+	std::set<int> claimed_subchids;
+	for(const Gtk::TreeModel::Row& row : services_table_liststore->children()) {
+		const LISTED_SERVICE& ls = (LISTED_SERVICE) row[services_table_cols.col_service];
+		if(ls.is_audio)
+			claimed_subchids.insert(ls.subchid);
+	}
+
+	// drop stale data-only rows (sub-channel gone, or now claimed by an audio service)
+	Gtk::ListStore::Children children = services_table_liststore->children();
+	for(Gtk::ListStore::iterator it = children.begin(); it != children.end();) {
+		const LISTED_SERVICE& ls = (LISTED_SERVICE) (*it)[services_table_cols.col_service];
+		if(!ls.is_audio && (known_subchannels.find(ls.subchid) == known_subchannels.end() || claimed_subchids.find(ls.subchid) != claimed_subchids.end()))
+			it = services_table_liststore->erase(it);
+		else
+			++it;
+	}
+
+	// add/update a non-playable placeholder row for every remaining (data-only) sub-channel,
+	// so it's listed - and its CUs accounted for - even though dablin can't play it
+	for(const std::pair<const int, FIC_SUBCHANNEL>& sc : known_subchannels) {
+		if(claimed_subchids.find(sc.first) != claimed_subchids.end() || sc.second.IsNone() || sc.second.pl.empty())
+			continue;
+
+		children = services_table_liststore->children();
+		Gtk::ListStore::iterator row_it = std::find_if(
+				children.begin(), children.end(),
+				[&](const Gtk::TreeModel::Row& row)->bool {
+					const LISTED_SERVICE& ls = (LISTED_SERVICE) row[services_table_cols.col_service];
+					return !ls.is_audio && ls.subchid == sc.first;
+				}
+		);
+		if(row_it == children.end())
+			row_it = services_table_liststore->append();
+
+		LISTED_SERVICE ls;
+		ls.is_audio = false;
+		ls.subchid = sc.first;
+		ls.pri_comp_subchid = sc.first;
+		ls.subchannel = sc.second;
+		std::map<int,uint32_t>::const_iterator sid_it = known_data_service_sids.find(sc.first);
+		if(sid_it != known_data_service_sids.end())
+			ls.sid = (int) sid_it->second;
+
+		Gtk::TreeModel::Row row = *row_it;
+		row[services_table_cols.col_service] = ls;
+	}
+}
+
 void DABlinGTK::InitWidgets() {
 	this->signal_delete_event().connect(sigc::mem_fun(*this, &DABlinGTK::on_window_delete_event));
 
 	// init widgets
-	frame_combo_channels.set_label("Channel");
-	frame_combo_channels.set_size_request(100, -1);
-	frame_combo_channels.add(channels_box);
+
+	// "Source" groups the two mutually exclusive ways to feed the ensemble - DAB live
+	// (RTL-SDR) and Network (EDI) - behind one pair of radio-style buttons, so only one
+	// of their controls is ever shown/usable at a time (picking one stops the other).
+	frame_source.set_label("Source");
+	frame_source.add(source_box);
+	source_box.set_spacing(WIDGET_SPACE);
+	source_box.pack_start(tglbtn_source_dab, Gtk::PACK_SHRINK);
+	source_box.pack_start(tglbtn_source_network, Gtk::PACK_SHRINK);
+	source_box.pack_start(source_stack, Gtk::PACK_SHRINK);
+
+	tglbtn_source_dab.set_label("DAB");
+	tglbtn_source_dab.set_mode(false);	// render as a flat toggle button, not a radio dot
+	tglbtn_source_network.set_label("Network");
+	tglbtn_source_network.set_mode(false);
+	tglbtn_source_network.join_group(tglbtn_source_dab);
+
+	tglbtn_source_dab.signal_toggled().connect([this]() {
+		if(tglbtn_source_dab.get_active())
+			on_source_type_changed(true);
+	});
+	tglbtn_source_network.signal_toggled().connect([this]() {
+		if(tglbtn_source_network.get_active())
+			on_source_type_changed(false);
+	});
+
+	source_stack.add(channels_box, "dab");
+	source_stack.add(network_box, "network");
 
 	channels_box.pack_start(combo_channels);
 	channels_box.pack_start(btn_channels_stop, Gtk::PACK_SHRINK);
@@ -497,15 +711,44 @@ void DABlinGTK::InitWidgets() {
 	combo_channels.set_model(combo_channels_liststore);
 	combo_channels.pack_start(combo_channels_cols.col_string);
 
-	if(!options.dab_live_source_binary.empty())
+	bool dab_available = !options.dab_live_source_binary.empty();
+	if(dab_available)
 		AddChannels();
-	else
-		frame_combo_channels.set_sensitive(false);
+	channels_box.set_sensitive(dab_available);
+	tglbtn_source_dab.set_sensitive(dab_available);
 
 	btn_channels_stop.set_image_from_icon_name("media-playback-start");
 	btn_channels_stop.signal_clicked().connect(sigc::mem_fun(*this, &DABlinGTK::on_btn_channels_stop));
 	btn_channels_stop.set_sensitive(false);
 	btn_channels_stop.set_tooltip_text("Stop/resume decoding current channel/service");
+
+	network_box.set_spacing(WIDGET_SPACE);
+	network_box.pack_start(combo_network_uri);
+	network_box.pack_start(tglbtn_network_connect, Gtk::PACK_SHRINK);
+
+	combo_network_uri.get_entry()->set_width_chars(22);
+	combo_network_uri.get_entry()->set_placeholder_text("tcp://host:port");
+	combo_network_uri.set_tooltip_text(
+			"EDI network source\n"
+			"tcp://host:port\n"
+			"udp://host:port (unicast)\n"
+			"udp://mcast-ip:port (multicast)"
+	);
+	for(const std::string& uri : LoadNetworkHistory())
+		combo_network_uri.append(uri);
+	combo_network_uri.get_entry()->signal_activate().connect([this]() {
+		if(!tglbtn_network_connect.get_active())
+			tglbtn_network_connect.set_active(true);
+	});
+
+	tglbtn_network_connect.set_label("Connect");
+	tglbtn_network_connect.signal_toggled().connect(sigc::mem_fun(*this, &DABlinGTK::on_tglbtn_network_connect));
+
+	// pick the initial source type - DAB when available (matching the pre-existing
+	// default), otherwise Network, which never depends on external hardware
+	tglbtn_source_dab.set_active(dab_available);
+	tglbtn_source_network.set_active(!dab_available);
+	source_stack.set_visible_child(dab_available ? "dab" : "network");
 
 	frame_label_ensemble.set_label("Ensemble");
 	frame_label_ensemble.add(label_ensemble);
@@ -525,6 +768,10 @@ void DABlinGTK::InitWidgets() {
 	services_table.set_model(services_table_liststore);
 	services_table.set_headers_visible(true);
 	services_table.get_selection()->signal_changed().connect(sigc::mem_fun(*this, &DABlinGTK::on_services_table_selection_changed));
+	// data services (e.g. EPG) are listed for CU accounting only - not selectable/playable
+	services_table.get_selection()->set_select_function([this](const Glib::RefPtr<Gtk::TreeModel>& model, const Gtk::TreeModel::Path& path, bool) {
+		return ((LISTED_SERVICE) (*model->get_iter(path))[services_table_cols.col_service]).is_audio;
+	});
 
 	static const char* services_table_column_titles[] =     {"SubChId", "SID", "ECC", "Label", "Short label", "CUs", "Protection", "Bit rate", "Format", "Samplerate", "Audio", "Language", "PTY"};
 	static const int services_table_column_min_widths[] =   {      60,    50,     50,    100,            80,     90,          80,         70,      110,           80,      70,         90,  180};
@@ -617,6 +864,10 @@ void DABlinGTK::InitWidgets() {
 	lower_controls_box.set_spacing(WIDGET_SPACE);
 	lower_controls_box.pack_start(frame_label_dl, false, false);
 	lower_controls_box.pack_start(dl_plus_slideshow_box, false, false);
+	// the level meter needs vexpand to fill its own frame, but that must not bubble up into
+	// top_grid's row allocation - otherwise enlarging the window vertically splits the extra
+	// space between "Services details" and this row, instead of only growing the former
+	lower_controls_box.set_vexpand(false);
 
 	frame_label_datetime.set_label("Local date/time");
 	frame_label_datetime.set_sensitive(false);
@@ -645,8 +896,8 @@ void DABlinGTK::InitWidgets() {
 	header_grid.set_row_spacing(WIDGET_SPACE);
 	header_grid.set_halign(Gtk::ALIGN_START);
 
-	header_grid.attach(frame_combo_channels, 0, 0, 1, 2);
-	header_grid.attach_next_to(frame_label_ensemble, frame_combo_channels, Gtk::POS_RIGHT, 1, 2);
+	header_grid.attach(frame_source, 0, 0, 1, 2);
+	header_grid.attach_next_to(frame_label_ensemble, frame_source, Gtk::POS_RIGHT, 1, 2);
 	header_grid.attach_next_to(frame_label_datetime, frame_label_ensemble, Gtk::POS_RIGHT, 1, 2);
 	header_grid.attach_next_to(tglbtn_logs, frame_label_datetime, Gtk::POS_RIGHT, 1, 1);
 	header_grid.attach_next_to(tglbtn_record, tglbtn_logs, Gtk::POS_RIGHT, 1, 1);
@@ -665,6 +916,7 @@ void DABlinGTK::InitWidgets() {
 
 	show_all_children();
 	progress_position.hide();	// invisible until progress updated
+	source_stack.set_visible_child(dab_available ? "dab" : "network");	// show_all_children() re-shows both pages
 }
 
 void DABlinGTK::AddChannels() {
@@ -1205,6 +1457,7 @@ void DABlinGTK::UpdateCUBar() {
 	for(const Gtk::TreeModel::Row& row : services_table_liststore->children())
 		services.push_back((LISTED_SERVICE) row[services_table_cols.col_service]);
 	cu_bar.SetServices(services);
+	cu_bar.SetSubchannels(known_subchannels);
 
 	int selected_subchid = AUDIO_SERVICE::subchid_none;
 	Gtk::TreeModel::iterator current_it = services_table.get_selection()->get_selected();
@@ -1328,6 +1581,7 @@ void DABlinGTK::FICChangeServiceEmitted() {
 			SetService(new_service);
 	}
 
+	RebuildDataSubchannelRows();
 	UpdateCUBar();
 }
 
@@ -1352,6 +1606,33 @@ void DABlinGTK::FICRemoveServiceEmitted() {
 
 	services_table_liststore->erase(row_it);
 
+	RebuildDataSubchannelRows();
+	UpdateCUBar();
+}
+
+void DABlinGTK::FICChangeSubchannelEmitted() {
+	std::pair<int,FIC_SUBCHANNEL> change = fic_change_subchannel.Pop();
+	known_subchannels[change.first] = change.second;
+	RebuildDataSubchannelRows();
+	UpdateCUBar();
+}
+
+void DABlinGTK::FICRemoveSubchannelEmitted() {
+	known_subchannels.erase(fic_remove_subchannel.Pop());
+	RebuildDataSubchannelRows();
+	UpdateCUBar();
+}
+
+void DABlinGTK::FICChangeDataServiceSIDEmitted() {
+	std::pair<int,uint32_t> change = fic_change_data_service_sid.Pop();
+	known_data_service_sids[change.first] = change.second;
+	RebuildDataSubchannelRows();
+	UpdateCUBar();
+}
+
+void DABlinGTK::FICRemoveDataServiceSIDEmitted() {
+	known_data_service_sids.erase(fic_remove_data_service_sid.Pop());
+	RebuildDataSubchannelRows();
 	UpdateCUBar();
 }
 
@@ -1429,10 +1710,27 @@ void DABlinGTK::FICDiscardedFIB() {
 	fprintf(stderr, "\x1B[33m" "(FIB)" "\x1B[0m" " ");
 }
 
-void DABlinGTK::on_combo_channels() {
-	btn_channels_stop.set_sensitive(true);
+void DABlinGTK::EnsureEnsemblePlayer(const std::string& format) {
+	if(options.source_format == format)
+		return;
 
-	// cleanup
+	// preserve mute/volume across the swap
+	bool mute = tglbtn_mute.get_active();
+	double volume = vlmbtn.get_value();
+	delete ensemble_player;
+
+	options.source_format = format;
+	if(format == EnsembleSource::FORMAT_ETI)
+		ensemble_player = new ETIPlayer(audio_output_type, options.disable_int_catch_up, this);
+	else
+		ensemble_player = new EDIPlayer(audio_output_type, options.disable_int_catch_up, this);
+
+	vlmbtn.set_sensitive(ensemble_player->HasAudioVolumeControl());
+	ensemble_player->SetAudioMute(mute);
+	ensemble_player->SetAudioVolume(volume);
+}
+
+void DABlinGTK::StopEnsembleSource() {
 	if(ensemble_source) {
 		ensemble_source->DoExit();
 		ensemble_source_thread.join();
@@ -1443,6 +1741,8 @@ void DABlinGTK::on_combo_channels() {
 	EnsembleResetFIC();
 	services_table_liststore->clear();	// TODO: prevent on_services_table_selection_changed() being called for each deleted row
 	logs_window.Clear();
+	known_subchannels.clear();
+	known_data_service_sids.clear();
 	UpdateCUBar();
 	ensemble_player->StopAudio();
 	label_ensemble.set_label("");
@@ -1455,6 +1755,31 @@ void DABlinGTK::on_combo_channels() {
 	utc_dt_curr = FIC_DAB_DT();
 	dt_lto = FIC_ENSEMBLE::lto_none;
 	dt_str_prev = "";
+}
+
+void DABlinGTK::on_source_type_changed(bool dab) {
+	source_stack.set_visible_child(dab ? "dab" : "network");
+
+	if(dab) {
+		// leaving Network - disconnect if currently connected
+		if(tglbtn_network_connect.get_active())
+			tglbtn_network_connect.set_active(false);
+	} else {
+		// leaving DAB - stop the current channel, if any
+		if(combo_channels.get_active_row_number() != -1)
+			combo_channels.unset_active();
+	}
+}
+
+void DABlinGTK::on_combo_channels() {
+	btn_channels_stop.set_sensitive(true);
+
+	// defensive: should be unreachable now that DAB/Network are mutually exclusive
+	// stack pages, but cheap insurance against any programmatic path that bypasses it
+	if(tglbtn_network_connect.get_active())
+		tglbtn_network_connect.set_active(false);
+
+	StopEnsembleSource();
 
 	// apply
 	Gtk::TreeModel::iterator row_it = combo_channels.get_active();
@@ -1476,6 +1801,8 @@ void DABlinGTK::on_combo_channels() {
 			switch_service_scids = LISTED_SERVICE::scids_none;
 		}
 
+		EnsureEnsemblePlayer(EnsembleSource::FORMAT_ETI);
+
 		if(options.dab_live_source_type == DABLiveETISource::TYPE_ETI_CMDLINE)
 			ensemble_source = new EtiCmdlineETISource(options.dab_live_source_binary, channel, this);
 		else
@@ -1486,6 +1813,95 @@ void DABlinGTK::on_combo_channels() {
 	} else {
 		combo_channels.set_tooltip_text("");
 		btn_channels_stop.set_image_from_icon_name("media-playback-start");
+	}
+}
+
+void DABlinGTK::ShowNetworkConnectError(const std::string& message) {
+	Gtk::MessageDialog dialog(*this, message, false, Gtk::MESSAGE_ERROR, Gtk::BUTTONS_OK, true);
+	dialog.set_title("Connection error");
+	dialog.run();
+}
+
+void DABlinGTK::AddToNetworkHistory(const std::string& uri) {
+	std::vector<std::string> history = LoadNetworkHistory();
+	history.erase(std::remove(history.begin(), history.end(), uri), history.end());
+	history.insert(history.begin(), uri);
+	if(history.size() > NETWORK_HISTORY_MAX_ENTRIES)
+		history.resize(NETWORK_HISTORY_MAX_ENTRIES);
+	SaveNetworkHistory(history);
+
+	combo_network_uri.remove_all();
+	for(const std::string& h : history)
+		combo_network_uri.append(h);
+	combo_network_uri.get_entry()->set_text(uri);
+}
+
+void DABlinGTK::on_tglbtn_network_connect() {
+	if(tglbtn_network_connect.get_active()) {
+		std::string uri = combo_network_uri.get_active_text();
+
+		static const std::string PREFIX_TCP = "tcp://";
+		static const std::string PREFIX_UDP = "udp://";
+
+		bool is_tcp;
+		std::string rest;
+		if(uri.compare(0, PREFIX_TCP.size(), PREFIX_TCP) == 0) {
+			is_tcp = true;
+			rest = uri.substr(PREFIX_TCP.size());
+		} else if(uri.compare(0, PREFIX_UDP.size(), PREFIX_UDP) == 0) {
+			is_tcp = false;
+			rest = uri.substr(PREFIX_UDP.size());
+		} else {
+			ShowNetworkConnectError("Unsupported URI - use tcp://host:port or udp://host:port");
+			tglbtn_network_connect.set_active(false);
+			return;
+		}
+
+		size_t colon_pos = rest.find_last_of(':');
+		std::string host = colon_pos == std::string::npos ? "" : rest.substr(0, colon_pos);
+		std::string port_str = colon_pos == std::string::npos ? "" : rest.substr(colon_pos + 1);
+
+		int port = -1;
+		if(!port_str.empty()) {
+			try {
+				size_t idx;
+				port = std::stoi(port_str, &idx);
+				if(idx != port_str.size())
+					port = -1;
+			} catch(const std::exception&) {
+				port = -1;
+			}
+		}
+		if(port <= 0 || port > 65535) {
+			ShowNetworkConnectError("Invalid or missing port in URI '" + uri + "'");
+			tglbtn_network_connect.set_active(false);
+			return;
+		}
+		if(is_tcp && host.empty()) {
+			ShowNetworkConnectError("tcp:// requires a host");
+			tglbtn_network_connect.set_active(false);
+			return;
+		}
+
+		AddToNetworkHistory(uri);
+
+		// take over from whatever was running before (initial CLI source, or a DAB-live channel)
+		StopEnsembleSource();
+		EnsureEnsemblePlayer(EnsembleSource::FORMAT_EDI);
+
+		if(is_tcp)
+			ensemble_source = new EDITCPSource(host, port, this);
+		else
+			ensemble_source = new EDIUDPSource(host, port, this);
+		ensemble_source_thread = std::thread(&EnsembleSource::Main, ensemble_source);
+
+		combo_network_uri.set_sensitive(false);
+		tglbtn_network_connect.set_label("Disconnect");
+	} else {
+		StopEnsembleSource();
+
+		combo_network_uri.set_sensitive(true);
+		tglbtn_network_connect.set_label("Connect");
 	}
 }
 

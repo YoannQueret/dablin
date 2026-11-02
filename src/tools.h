@@ -42,6 +42,10 @@ public:
 	static size_t UTF8Len(const std::string &s);
 	static std::string UTF8Substr(const std::string &s, size_t pos, size_t count);
 	static std::string IntToHex(int value, size_t nibbles);
+
+	// a SId's hex form, without the "0x" prefix, sized to 4 nibbles (16-bit, programme
+	// services) or 8 nibbles (32-bit, data services) depending on its actual magnitude
+	static std::string SidToHex(int sid);
 };
 
 

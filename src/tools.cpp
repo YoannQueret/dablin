@@ -91,6 +91,10 @@ std::string StringTools::IntToHex(int value, size_t nibbles) {
 	return result;
 }
 
+std::string StringTools::SidToHex(int sid) {
+	return IntToHex(sid, (unsigned) sid > 0xFFFF ? 8 : 4).substr(2);
+}
+
 
 // --- CharsetTools -----------------------------------------------------------------
 const char* CharsetTools::no_char = "";

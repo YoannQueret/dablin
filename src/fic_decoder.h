@@ -77,10 +77,15 @@ struct FIC_SUBCHANNEL {
 	int bitrate;
 	int language;
 
+	// liveness, as (re)announced by FIG 0/1 - used to detect a sub-channel being hot-removed,
+	// independently of whether any (audio) service ever claimed it (e.g. data-only services)
+	bool seen_in_fig0_1;
+	std::chrono::steady_clock::time_point last_seen_fig0_1;
+
 	static const int language_none = -1;
 	bool IsNone() const {return pl.empty() && language == language_none;}
 
-	FIC_SUBCHANNEL() : start(0), size(0), bitrate(-1), language(language_none) {}
+	FIC_SUBCHANNEL() : start(0), size(0), bitrate(-1), language(language_none), seen_in_fig0_1(false) {}
 
 	bool operator==(const FIC_SUBCHANNEL & fic_subchannel) const {
 		return
@@ -241,6 +246,12 @@ struct LISTED_SERVICE {
 	cids_t cids;
 	int ecc;	// ecc_none, unless this service's ECC differs from the ensemble's
 
+	// true for a real, playable audio service; false for a data-only sub-channel (e.g. EPG)
+	// listed purely so its CU usage is visible - subchid is its sub-channel regardless of
+	// which case this is (audio_service.subchid is only ever meaningful when is_audio)
+	bool is_audio;
+	int subchid;
+
 	int pri_comp_subchid;	// only used for sorting
 	bool multi_comps;
 
@@ -267,6 +278,8 @@ struct LISTED_SERVICE {
 		sls_app_type(sls_app_type_none),
 		asu_flags(asu_flags_none),
 		ecc(ecc_none),
+		is_audio(true),
+		subchid(AUDIO_SERVICE::subchid_none),
 		pri_comp_subchid(AUDIO_SERVICE::subchid_none),
 		multi_comps(false)
 	{}
@@ -296,6 +309,17 @@ public:
 	virtual void FICRemoveService(const fic_service_id_t& /*service_id*/) {}
 	virtual void FICChangeUTCDateTime(const FIC_DAB_DT& /*utc_dt*/) {}
 
+	// every sub-channel in the ensemble (audio AND data, e.g. EPG), so CU occupancy can be
+	// shown accurately even for sub-channels with no (audio) service dablin can play
+	virtual void FICChangeSubchannel(int /*subchid*/, const FIC_SUBCHANNEL& /*subchannel*/) {}
+	virtual void FICRemoveSubchannel(int /*subchid*/) {}
+
+	// the (16- or 32-bit) SId of a plain data service (e.g. EPG) whose primary component is
+	// "MSC stream data" (FIG 0/2, P/D=1, TMid=1) - packet-mode (TMid=3) data services would
+	// additionally require FIG 0/3 SCId resolution, which isn't implemented
+	virtual void FICChangeDataServiceSID(int /*subchid*/, uint32_t /*sid*/) {}
+	virtual void FICRemoveDataServiceSID(int /*subchid*/) {}
+
 	// human-readable record of a hot change on the ensemble (EId, SId, label, short label, protection, bit rate, ...)
 	virtual void FICLogMessage(const std::string& /*message*/) {}
 
@@ -315,6 +339,8 @@ private:
 	void ProcessFIG0_0(const uint8_t *data, size_t len);
 	void ProcessFIG0_1(const uint8_t *data, size_t len);
 	void ProcessFIG0_2(const uint8_t *data, size_t len);
+	void ProcessFIG0_2_Data(const uint8_t *data, size_t len);
+	void ProcessFIG0_3(const uint8_t *data, size_t len);
 	void ProcessFIG0_5(const uint8_t *data, size_t len);
 	void ProcessFIG0_8(const uint8_t *data, size_t len);
 	void ProcessFIG0_9(const uint8_t *data, size_t len);
@@ -336,6 +362,9 @@ private:
 	void UpdateListedService(const FIC_SERVICE& service, int scids, bool multi_comps);
 	int GetSLSAppType(const ua_data_t& ua_data);
 
+	void SetDataServiceSid(int subchid, uint32_t sid);
+	void ResolvePacketDataService(int scid);
+
 	void Log(const std::string& message);
 
 	FIC_ENSEMBLE ensemble;
@@ -343,9 +372,12 @@ private:
 
 	fic_services_t services;
 	fic_subchannels_t subchannels;	// from FIG 0/1: SubChId -> FIC_SUBCHANNEL
+	std::map<int,uint32_t> data_service_sids;	// from FIG 0/2 (P/D=1): SubChId -> data service SId
+	std::map<int,uint32_t> packet_data_service_sids;	// from FIG 0/2 (P/D=1, TMid=3): SCId -> SId (pending)
+	std::map<int,int> packet_data_subchids;	// from FIG 0/3: SCId -> SubChId (pending)
 
 	void RemoveService(const FIC_SERVICE& service);
-	void PruneOrphanedSubchannels();
+	void PruneStaleSubchannels();
 
 	// minimum time a service may go unmentioned in FIG 0/2 before being considered hot-removed
 	static const std::chrono::seconds service_timeout;

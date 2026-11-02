@@ -97,7 +97,7 @@ public:
 	EnsembleSource(std::string filename, EnsembleSourceObserver *observer, std::string format_name, size_t initial_frame_size);
 	virtual ~EnsembleSource();
 
-	int Main();
+	virtual int Main();
 	void DoExit() {do_exit = true;}
 
 	static const std::string FORMAT_ETI;
