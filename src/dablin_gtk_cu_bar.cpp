@@ -128,7 +128,7 @@ bool DABlinGTKCUBar::on_draw(const Cairo::RefPtr<Cairo::Context>& cr) {
 }
 
 bool DABlinGTKCUBar::on_button_press_event(GdkEventButton* event) {
-	if(event->type != GDK_BUTTON_PRESS || event->button != 1)
+	if(!is_sensitive() || event->type != GDK_BUTTON_PRESS || event->button != 1)
 		return false;
 
 	Gtk::Allocation allocation = get_allocation();

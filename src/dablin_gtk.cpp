@@ -257,6 +257,7 @@ DABlinGTK::DABlinGTK(DABlinGTKOptions options) {
 
 	ensemble_update_progress.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::EnsembleUpdateProgressEmitted));
 	ensemble_change_format.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::EnsembleChangeFormatEmitted));
+	ensemble_audio_level.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::EnsembleAudioLevelEmitted));
 	fic_change_ensemble.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeEnsembleEmitted));
 	fic_change_service.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICChangeServiceEmitted));
 	fic_remove_service.GetDispatcher().connect(sigc::mem_fun(*this, &DABlinGTK::FICRemoveServiceEmitted));
@@ -555,12 +556,16 @@ void DABlinGTK::InitWidgets() {
 	frame_dl_plus.set_hexpand(true);
 	frame_dl_plus.add(dl_plus_content);
 
+	frame_level_meter.set_label("Level");
+	frame_level_meter.add(level_meter);
+
 	frame_slideshow.set_label("Slideshow");
 	frame_slideshow.add(slideshow_content);
 
 	dl_plus_slideshow_box.set_orientation(Gtk::ORIENTATION_HORIZONTAL);
 	dl_plus_slideshow_box.set_spacing(WIDGET_SPACE);
 	dl_plus_slideshow_box.pack_start(frame_dl_plus, true, true);
+	dl_plus_slideshow_box.pack_start(frame_level_meter, false, false);
 	dl_plus_slideshow_box.pack_start(frame_slideshow, false, false);
 
 	lower_controls_box.set_orientation(Gtk::ORIENTATION_VERTICAL);
@@ -693,6 +698,7 @@ void DABlinGTK::SetService(const LISTED_SERVICE& service) {
 		frame_label_dl.set_tooltip_text("");
 
 		dl_plus_content.ClearDLPlusInfo();
+		level_meter.Reset();
 
 		if(!service.HasSLS())
 			slideshow_content.ClearSlide();
@@ -834,6 +840,7 @@ void DABlinGTK::on_tglbtn_record() {
 			combo_channels.set_sensitive(false);	// parent frame already non-sensitive, if channels not available
 			btn_channels_stop.set_sensitive(false);	// parent frame already non-sensitive, if channels not available
 			services_table.set_sensitive(false);
+			cu_bar.set_sensitive(false);
 
 			set_icon_name("media-record");
 			fprintf(stderr, "DABlinGTK: recording started into '%s'\n", new_rec_filename.c_str());
@@ -887,6 +894,7 @@ void DABlinGTK::on_tglbtn_record() {
 			combo_channels.set_sensitive(true);		// parent frame already non-sensitive, if channels not available
 			btn_channels_stop.set_sensitive(true);	// parent frame already non-sensitive, if channels not available
 			services_table.set_sensitive(true);
+			cu_bar.set_sensitive(true);
 		}
 	}
 }
@@ -1187,6 +1195,10 @@ void DABlinGTK::EnsembleChangeFormatEmitted() {
 	Gtk::TreeModel::iterator current_it = services_table.get_selection()->get_selected();
 	current_audio_format_subchid = current_it ? ((LISTED_SERVICE) (*current_it)[services_table_cols.col_service]).audio_service.subchid : AUDIO_SERVICE::subchid_none;
 	services_table.queue_draw();
+}
+
+void DABlinGTK::EnsembleAudioLevelEmitted() {
+	level_meter.SetLevels(ensemble_audio_level.Pop());
 }
 
 void DABlinGTK::FICChangeEnsemble(const FIC_ENSEMBLE& ensemble) {

@@ -29,6 +29,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "subchannel_sink.h"
 #include "dab_decoder.h"
@@ -50,6 +51,8 @@ public:
 	virtual void EnsembleChangeFormat(const AUDIO_SERVICE_FORMAT& /*format*/) {}
 	virtual void EnsembleProcessFIC(const uint8_t* /*data*/, size_t /*len*/) {}
 	virtual void EnsembleProcessPAD(const uint8_t* /*xpad_data*/, size_t /*xpad_len*/, bool /*exact_xpad_len*/, const uint8_t* /*fpad_data*/) {}
+	// one entry per audio channel (1 = mono, 2 = stereo), in the order the stream carries them
+	virtual void EnsembleAudioLevel(const std::vector<double>& /*channel_dbfs*/) {}
 };
 
 
@@ -67,12 +70,13 @@ protected:
 
 	SubchannelSink *dec;
 	AudioOutput *out;
+	int audio_channels;
 
 	virtual void DecodeFrame(const uint8_t *ensemble_frame) = 0;
 
 	void FormatChange(const AUDIO_SERVICE_FORMAT& format);
-	void StartAudio(int samplerate, int channels) {if(out) out->StartAudio(samplerate, channels);}
-	void PutAudio(const uint8_t *data, size_t len) {if(out) out->PutAudio(data, len);}
+	void StartAudio(int samplerate, int channels) {audio_channels = channels; if(out) out->StartAudio(samplerate, channels);}
+	void PutAudio(const uint8_t *data, size_t len);
 
 	void ProcessFIC(const uint8_t *data, size_t len);
 	void ProcessPAD(const uint8_t *xpad_data, size_t xpad_len, bool exact_xpad_len, const uint8_t *fpad_data);

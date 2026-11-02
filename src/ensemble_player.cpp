@@ -18,6 +18,10 @@
 
 #include "ensemble_player.h"
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+
 
 // --- EnsemblePlayer -----------------------------------------------------------------
 EnsemblePlayer::EnsemblePlayer(AudioOutputType audio_output_type, bool disable_int_catch_up, EnsemblePlayerObserver *observer) {
@@ -27,6 +31,7 @@ EnsemblePlayer::EnsemblePlayer(AudioOutputType audio_output_type, bool disable_i
 
 	dec = nullptr;
 	out = nullptr;
+	audio_channels = 1;
 
 	switch(audio_output_type) {
 #ifndef DABLIN_DISABLE_SDL
@@ -107,6 +112,35 @@ void EnsemblePlayer::ProcessFrame(const uint8_t *data) {
 	next_frame_time += std::chrono::milliseconds(24);
 
 	DecodeFrame(data);
+}
+
+void EnsemblePlayer::PutAudio(const uint8_t *data, size_t len) {
+	if(out)
+		out->PutAudio(data, len);
+
+	// derive a per-channel dBFS peak level from the signed 16bit interleaved PCM samples, for the level meter
+	if(observer) {
+		const int16_t *samples = (const int16_t*) data;
+		size_t num_samples = len / sizeof(int16_t);
+		int channels = audio_channels > 0 ? audio_channels : 1;
+
+		std::vector<int16_t> peaks(channels, 0);
+		for(size_t i = 0; i < num_samples; i++) {
+			int16_t sample = samples[i];
+			int16_t abs_sample = sample == INT16_MIN ? INT16_MAX : (int16_t) std::abs(sample);
+			int16_t& peak = peaks[i % channels];
+			if(abs_sample > peak)
+				peak = abs_sample;
+		}
+
+		static const double silence_dbfs = -60.0;
+		std::vector<double> levels_dbfs(channels);
+		for(int ch = 0; ch < channels; ch++) {
+			double dbfs = peaks[ch] > 0 ? 20.0 * log10(peaks[ch] / 32768.0) : silence_dbfs;
+			levels_dbfs[ch] = std::max(dbfs, silence_dbfs);
+		}
+		observer->EnsembleAudioLevel(levels_dbfs);
+	}
 }
 
 void EnsemblePlayer::FormatChange(const AUDIO_SERVICE_FORMAT& format) {
