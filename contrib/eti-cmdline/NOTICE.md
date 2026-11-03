@@ -36,6 +36,21 @@ build or install eti-cmdline.
   `rtlsdr_get_device_usb_strings()`, which writes into them rather than
   allocating them itself - this reliably segfaulted on startup. Replaced
   with fixed-size stack buffers. No other DSP/decoding logic was modified.
+- Fixed a missing `break` in `main.cpp`'s option-parsing `switch` (the `-L`
+  case, select RTL-SDR device by serial number): without it, `-L <serial>`
+  fell through into the next compiled case in this RTL-SDR-only build and
+  silently also set `isSilent = true`.
+- Raised `cmake_minimum_required` from 3.5 to 3.10, matching dablin's own
+  requirement and silencing a "compatibility with CMake < 3.10 will be
+  removed" deprecation warning.
+- Silenced a handful of `-Wunused-parameter` warnings (`protection.cpp`,
+  `fic-handler.cpp`, `eti-generator.cpp`, `rtlsdr-handler.cpp`) by commenting
+  out the unused parameter names; no behavior was changed. Note:
+  `rtlsdrHandler::restartReader()`'s frequency parameter was already unused
+  upstream - the function retunes to the `frequency` member instead, which
+  happens to equal the passed-in value at dablin's only call site (right
+  after construction), so this is a pre-existing, currently-harmless quirk
+  rather than something introduced or fixed here.
 
 ## Updating
 

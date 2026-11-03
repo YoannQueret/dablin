@@ -599,6 +599,7 @@ struct sigaction sigact;
 	
 	      case 'L':
 	         deviceSerial	= optarg;
+	         break;
 
 #elif	defined (HAVE_AIRSPY)
 	      case 'G':

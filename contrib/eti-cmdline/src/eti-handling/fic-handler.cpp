@@ -165,7 +165,7 @@ int16_t	ficno	= 0;
   *	In the next coding step, we will combine this function with the
   *	one above
   */
-void	ficHandler::process_ficInput (int16_t *ficblock,
+void	ficHandler::process_ficInput (int16_t */*ficblock*/,
 	                              int16_t ficno,
 	                              uint8_t *fib_bytes,
 	                              bool	*valid) {

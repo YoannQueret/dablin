@@ -429,7 +429,7 @@ std::vector<parameter *> theParameters;
 	return offset;
 }
 
-static void	process_subCh (int nr, parameter *p,
+static void	process_subCh (int /*nr*/, parameter *p,
 	                       protection *prot,
 	                       uint8_t *desc, semaphore *locker) {
 	// ERROR CORRECTION
@@ -465,7 +465,7 @@ int	j, k;
 #endif
 }
 
-void	etiGenerator::postProcess (uint8_t *theVector, int32_t offset){
+void	etiGenerator::postProcess (uint8_t */*theVector*/, int32_t /*offset*/){
 }
 
 void	etiGenerator::startProcessing	(void) {

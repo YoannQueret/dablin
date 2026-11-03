@@ -54,9 +54,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_COMPILER_IS_CLANGXX)
-    # C++11
-    add_compile_options(-std=c++0x)
-    
+    # C++11 - CXX-only, so it doesn't leak onto C sources (e.g. the bundled eti-cmdline's C files)
+    # pulled in by a later add_subdirectory() and trigger "valid for C++/ObjC++ but not for C"
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-std=c++0x>)
+
     # warnings
     add_compile_options(-Wall)
     add_compile_options(-Wextra)

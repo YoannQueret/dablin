@@ -173,7 +173,7 @@ err:
 	rtlsdr_close (device);
 }
 //
-bool	rtlsdrHandler::restartReader	(int32_t freqency) {
+bool	rtlsdrHandler::restartReader	(int32_t /*freqency*/) {
 int32_t	r;
 
 	if (running. load ())
